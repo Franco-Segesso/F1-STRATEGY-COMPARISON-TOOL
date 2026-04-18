@@ -1,420 +1,1146 @@
 import math
 import os
-import tkinter as tk
-from tkinter import ttk, messagebox
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib import rcParams
+import sys
+import time
 
-from f1_data import TEAMS, TIRES, TRACKS, TRACK_EVENT_ALIASES, WEATHER, build_track_from_points, load_reference_profile
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QBrush
+from PySide6.QtWidgets import (
+    QApplication,
+    QBoxLayout,
+    QComboBox,
+    QFrame,
+    QGridLayout,
+    QHeaderView,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+from f1_core import CACHE_DIR, TEAMS, TIRES, TRACKS, WEATHER, build_geo, fmt_sec, point_at, refresh_real_track, simulate, state_at, track_layout
+from f1_data import TRACK_EVENT_ALIASES, load_reference_profile
 from f1_fetch_real_data import build_reference
 
-G, RHO = 9.81, 1.225
-CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".fastf1_cache")
 
-def clamp(x,a,b): return max(a,min(b,x))
-def fmt_sec(s): m=int(s//60); return f"{m}:{(s-m*60):06.3f}"
-def angle_wrap(a):
-    while a>math.pi: a-=2*math.pi
-    while a<-math.pi: a+=2*math.pi
-    return a
-def pit_sched(total,stops):
-    if stops<=0: return []
-    return [max(2,min(total-1,round(i*total/(stops+1)))) for i in range(1,stops+1)]
+PALETTE = {
+    "bg": "#08111f",
+    "shell": "#0e192a",
+    "card": "#13253d",
+    "panel": "#193150",
+    "line": "#294769",
+    "ink": "#f4f7ff",
+    "muted": "#8ea7c8",
+    "accent": "#ff6a3d",
+    "cyan": "#29d5cb",
+    "green": "#45d17c",
+    "track": "#091423",
+    "asphalt": "#7f8ea8",
+    "runoff": "#13304d",
+    "grass": "#0d2a23",
+}
 
-REAL_TRACKS={name:build_track_from_points(name) for name in TRACKS}
+TEAM_LIVERIES = {
+    "Ferrari": dict(body="#d61f2c", accent="#f7f1d1", dark="#7d0d14"),
+    "McLaren": dict(body="#ff7a1a", accent="#8ce6ff", dark="#8e3f00"),
+    "Mercedes": dict(body="#12c6b2", accent="#eefaff", dark="#0f5f57"),
+    "Red Bull Racing": dict(body="#1d2f6f", accent="#f2bf27", dark="#101b45"),
+    "Aston Martin": dict(body="#0d6a57", accent="#d4fff3", dark="#083c32"),
+    "Williams": dict(body="#1a4cff", accent="#d9e6ff", dark="#0e2a8f"),
+    "Alpine": dict(body="#ff5ecf", accent="#a0ebff", dark="#7f2a6c"),
+    "Haas F1 Team": dict(body="#d7dce4", accent="#ff4d4d", dark="#737983"),
+    "Racing Bulls": dict(body="#e9f1ff", accent="#3c78ff", dark="#8e99aa"),
+    "Audi": dict(body="#bf2026", accent="#e4e4e4", dark="#5e0f14"),
+    "Cadillac": dict(body="#1e5cff", accent="#ffffff", dark="#12316f"),
+}
 
-def track_layout(name):
-    real=REAL_TRACKS.get(name)
-    return real if real else TRACKS[name]
 
-def reference_adjustments(track_name,team_name):
-    ref=load_reference_profile(track_name)
-    if not ref: return {}
-    team_data=(ref.get("teams") or {}).get(team_name,{})
-    track_data=ref.get("track",{})
-    return dict(
-        topSpeedKph=team_data.get("top_speed_kph"),
-        avgLapKph=team_data.get("avg_speed_kph"),
-        fuelPerLapKg=track_data.get("fuel_per_lap_kg"),
-        pitLoss=track_data.get("pit_loss_s"),
-    )
+def app_stylesheet():
+    return f"""
+    QWidget {{
+        background: {PALETTE['bg']};
+        color: {PALETTE['ink']};
+        font-family: 'Segoe UI';
+        font-size: 10pt;
+    }}
+    QMainWindow {{
+        background: {PALETTE['bg']};
+    }}
+    QFrame#shell {{
+        background: {PALETTE['shell']};
+        border: 1px solid {PALETTE['line']};
+        border-radius: 18px;
+    }}
+    QFrame#card, QFrame#kpi {{
+        background: {PALETTE['card']};
+        border: 1px solid {PALETTE['line']};
+        border-radius: 16px;
+    }}
+    QFrame#kpi {{
+        background: #10243b;
+    }}
+    QFrame#sidebar {{
+        background: {PALETTE['shell']};
+        border: none;
+    }}
+    QLabel#title {{
+        font-family: 'Bahnschrift SemiBold';
+        font-size: 24pt;
+        font-weight: 700;
+    }}
+    QLabel#subtitle, QLabel#muted, QLabel#fieldLabel {{
+        color: {PALETTE['muted']};
+    }}
+    QLabel#section {{
+        color: {PALETTE['cyan']};
+        font-size: 9pt;
+        font-weight: 700;
+        letter-spacing: 1px;
+    }}
+    QLabel#kpiTitle {{
+        color: {PALETTE['muted']};
+        font-size: 9pt;
+        font-weight: 600;
+    }}
+    QLabel#kpiValue {{
+        font-family: 'Bahnschrift SemiBold';
+        font-size: 18pt;
+        font-weight: 700;
+    }}
+    QLineEdit, QComboBox {{
+        background: {PALETTE['panel']};
+        border: 1px solid {PALETTE['line']};
+        border-radius: 10px;
+        padding: 8px 10px;
+        min-height: 18px;
+    }}
+    QComboBox::drop-down {{
+        border: none;
+        width: 24px;
+    }}
+    QPushButton {{
+        border-radius: 11px;
+        padding: 10px 14px;
+        border: 1px solid {PALETTE['line']};
+        background: {PALETTE['panel']};
+        font-weight: 600;
+    }}
+    QPushButton:hover {{
+        background: #24405f;
+    }}
+    QPushButton#accent {{
+        background: {PALETTE['accent']};
+        border-color: {PALETTE['accent']};
+        color: white;
+    }}
+    QPushButton#accent:hover {{
+        background: #ff7e58;
+    }}
+    QTabWidget::pane {{
+        border: none;
+    }}
+    QTabBar::tab {{
+        background: {PALETTE['shell']};
+        color: {PALETTE['muted']};
+        border: 1px solid {PALETTE['line']};
+        padding: 10px 16px;
+        border-top-left-radius: 10px;
+        border-top-right-radius: 10px;
+        margin-right: 4px;
+    }}
+    QTabBar::tab:selected {{
+        background: {PALETTE['card']};
+        color: {PALETTE['ink']};
+    }}
+    QTableWidget {{
+        background: {PALETTE['card']};
+        border: 1px solid {PALETTE['line']};
+        border-radius: 12px;
+        gridline-color: {PALETTE['line']};
+        selection-background-color: #294565;
+    }}
+    QHeaderView::section {{
+        background: {PALETTE['panel']};
+        color: {PALETTE['ink']};
+        padding: 8px;
+        border: none;
+        border-bottom: 1px solid {PALETTE['line']};
+        font-weight: 700;
+    }}
+    QScrollArea {{
+        border: none;
+        background: transparent;
+    }}
+    """
 
-def integrate(params,seg,state,track):
-    dist,dt=seg["distanceKm"]*1000,0.05
-    base_radius={"straight":12000,"fast":170,"slow":72}[seg["type"]]
-    x,v,t=0,max(22,state["vEntry"]),0
-    top_speed=params["topSpeedMS"]*(0.985 if seg["type"]=="straight" else 0.88 if seg["type"]=="fast" else 0.72)
-    while x<dist:
-        m=params["mass"]+state["fuel"]
-        tyre_state=max(0.72,1-0.0031*state["wear"])
-        grip=max(0.78,params["gripEff"]*tyre_state)
-        aero_downforce=0.5*RHO*params["downforce"]*v*v
-        normal=m*G+aero_downforce
-        traction=params["traction"]*grip*normal
-        straight_drag_scale=0.92 if seg["type"]=="straight" and track["drsZones"]>0 else 1.0
-        drag=0.5*RHO*params["dragEff"]*straight_drag_scale*v*v
-        power_force=min((params["powerW"]+params["ersW"])/max(v,14),traction)
-        rolling=0.014*m*G
-        accel=(power_force-drag-rolling)/m
-        if seg["type"]!="straight":
-            vc=min(top_speed,math.sqrt(max(25,grip*G*base_radius))*params["cornerFactor"])
-            if v>vc:
-                brake=(params["brakeMS2"]+0.0045*aero_downforce/m)*(1.05 if seg["type"]=="slow" else 0.92)
-                accel=-max(0.5,brake*(v-vc)/max(v,1))
+
+class Field(QWidget):
+    def __init__(self, label, widget):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+        lbl = QLabel(label.upper())
+        lbl.setObjectName("fieldLabel")
+        layout.addWidget(lbl)
+        layout.addWidget(widget)
+
+
+class KpiCard(QFrame):
+    def __init__(self, title, accent):
+        super().__init__()
+        self.setObjectName("kpi")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(6)
+        bar = QFrame()
+        bar.setFixedHeight(4)
+        bar.setStyleSheet(f"background:{accent}; border:none; border-radius:2px;")
+        title_lbl = QLabel(title.upper())
+        title_lbl.setObjectName("kpiTitle")
+        self.value = QLabel("-")
+        self.value.setObjectName("kpiValue")
+        layout.addWidget(bar)
+        layout.addWidget(title_lbl)
+        layout.addWidget(self.value)
+
+
+class Card(QFrame):
+    def __init__(self, title=None):
+        super().__init__()
+        self.setObjectName("card")
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(14, 14, 14, 14)
+        self.layout.setSpacing(10)
+        if title:
+            lbl = QLabel(title.upper())
+            lbl.setObjectName("section")
+            self.layout.addWidget(lbl)
+
+
+class TrackWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setMinimumHeight(240)
+        self.geo = None
+        self.state_a = None
+        self.state_b = None
+        self.team_a = "Ferrari"
+        self.team_b = "McLaren"
+
+    def set_scene(self, geo, state_a=None, state_b=None, team_a=None, team_b=None):
+        self.geo = geo
+        self.state_a = state_a
+        self.state_b = state_b
+        if team_a:
+            self.team_a = team_a
+        if team_b:
+            self.team_b = team_b
+        self.update()
+
+    def _draw_track_surface(self, painter, path):
+        painter.setPen(QPen(QColor(PALETTE["grass"]), 44, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(path)
+        painter.setPen(QPen(QColor(PALETTE["runoff"]), 34, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(path)
+        painter.setPen(QPen(QColor("#39455c"), 24, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(path)
+        painter.setPen(QPen(QColor(PALETTE["asphalt"]), 14, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(path)
+        painter.setPen(QPen(QColor(255, 255, 255, 45), 2, Qt.DashLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(path)
+
+    def _draw_trail(self, painter, state, color):
+        if not state:
+            return
+        base = state["pRace"]
+        for idx in range(7, 0, -1):
+            fade = idx / 7.0
+            pos = point_at(self.geo, max(0.0, base - idx * 0.004))
+            painter.setPen(Qt.NoPen)
+            c = QColor(color)
+            c.setAlpha(int(18 + fade * 42))
+            painter.setBrush(c)
+            r = max(2, int(2 + fade * 2))
+            painter.drawEllipse(int(pos["x"] - r), int(pos["y"] - r), r * 2, r * 2)
+
+    def _draw_f1_car(self, painter, x, y, ang, team_name, label):
+        livery = TEAM_LIVERIES.get(team_name, dict(body=PALETTE["accent"], accent="#ffffff", dark="#7a2b14"))
+        painter.save()
+        painter.translate(x, y)
+        painter.rotate(math.degrees(ang))
+        body = QColor(livery["body"])
+        accent = QColor(livery["accent"])
+        dark = QColor(livery["dark"])
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(20, 24, 32, 230))
+        for wx, wy in [(-9, -7), (-9, 7), (8, -7), (8, 7)]:
+            painter.drawRoundedRect(wx - 2, wy - 3, 4, 6, 1.2, 1.2)
+
+        painter.setBrush(dark)
+        painter.drawRect(-12, -9, 2, 18)
+        painter.drawRect(8, -10, 3, 20)
+
+        painter.setBrush(body)
+        painter.drawRoundedRect(-9, -4, 18, 8, 3.2, 3.2)
+        painter.drawRoundedRect(-2, -3, 11, 6, 2.6, 2.6)
+        painter.drawRoundedRect(-13, -2.2, 5, 4.4, 1.6, 1.6)
+
+        painter.setBrush(accent)
+        painter.drawRect(9, -9, 2, 18)
+        painter.drawRect(-14, -11, 2, 22)
+        painter.drawRect(-15, -7, 2, 14)
+        painter.drawRect(-12, -11, 1, 22)
+        painter.drawRect(0, -1, 7, 2)
+
+        painter.setBrush(QColor("#13161d"))
+        painter.drawRoundedRect(-3, -2, 5, 4, 1.6, 1.6)
+        painter.drawRect(1, -0.8, 3, 1.6)
+
+        painter.setPen(QPen(QColor(PALETTE["ink"]), 1.2))
+        painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+        painter.drawText(-6, -12, 12, 8, Qt.AlignCenter, label)
+        painter.restore()
+
+    def _draw_hud(self, painter):
+        hud_rect = self.rect().adjusted(14, 12, -14, -12)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(8, 13, 22, 180))
+        painter.drawRoundedRect(hud_rect.left(), hud_rect.top(), 184, 52, 10, 10)
+        painter.setPen(QColor(PALETTE["muted"]))
+        painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
+        painter.drawText(hud_rect.left() + 12, hud_rect.top() + 18, "LIVE TRACK MAP")
+        painter.setFont(QFont("Segoe UI", 8))
+        painter.setPen(QColor(PALETTE["ink"]))
+        painter.drawText(hud_rect.left() + 12, hud_rect.top() + 36, f"A  {self.team_a}")
+        painter.drawText(hud_rect.left() + 12, hud_rect.top() + 50, f"B  {self.team_b}")
+        painter.setBrush(QColor(PALETTE["accent"]))
+        painter.drawRoundedRect(hud_rect.left() + 154, hud_rect.top() + 26, 12, 5, 2, 2)
+        painter.setBrush(QColor(PALETTE["cyan"]))
+        painter.drawRoundedRect(hud_rect.left() + 154, hud_rect.top() + 40, 12, 5, 2, 2)
+
+    def _draw_driver_panel(self, painter, side, label, team_name, state, color_hex):
+        x = 14 if side == "left" else self.width() - 210
+        y = self.height() - 92
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(8, 13, 22, 196))
+        painter.drawRoundedRect(x, y, 196, 78, 12, 12)
+        painter.setBrush(QColor(color_hex))
+        painter.drawRoundedRect(x + 10, y + 10, 10, 10, 3, 3)
+        painter.setPen(QColor(PALETTE["ink"]))
+        painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
+        painter.drawText(x + 28, y + 20, f"{label}  {team_name}")
+        if not state:
+            return
+        painter.setFont(QFont("Segoe UI", 8))
+        painter.setPen(QColor(PALETTE["muted"]))
+        painter.drawText(x + 12, y + 40, f"Lap {state['lap']}")
+        painter.drawText(x + 72, y + 40, f"{state['speed']:.0f} km/h")
+        painter.drawText(x + 12, y + 58, f"Tire {state.get('tire', '-')}")
+        painter.drawText(x + 12, y + 74, "PIT" if state.get("pit") else "Track")
+
+    def _draw_delta_bar(self, painter):
+        if not (self.state_a and self.state_b):
+            return
+        left = 230
+        right = self.width() - 230
+        mid = (left + right) / 2
+        y = 28
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(8, 13, 22, 180))
+        painter.drawRoundedRect(left, y - 10, right - left, 26, 10, 10)
+        painter.setBrush(QColor("#2a3e5d"))
+        painter.drawRoundedRect(left + 10, y, right - left - 20, 6, 3, 3)
+        delta = max(-1.0, min(1.0, self.state_a["pRace"] - self.state_b["pRace"]))
+        if delta >= 0:
+            painter.setBrush(QColor(PALETTE["accent"]))
+            painter.drawRoundedRect(int(mid), y, int((right - left - 20) * abs(delta) * 0.5), 6, 3, 3)
         else:
-            accel=min(accel,(params["topSpeedMS"]-v)/max(dt,1e-6))
-        v=max(14,min(params["topSpeedMS"],v+accel*dt))
-        x+=v*dt
-        t+=dt
-        if t>220: break
-    return dict(t=t,vOut=v)
+            painter.setBrush(QColor(PALETTE["cyan"]))
+            painter.drawRoundedRect(int(mid - (right - left - 20) * abs(delta) * 0.5), y, int((right - left - 20) * abs(delta) * 0.5), 6, 3, 3)
+        painter.setPen(QColor(PALETTE["ink"]))
+        painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
+        leader = "AHEAD A" if delta >= 0 else "AHEAD B"
+        painter.drawText(left + 14, y + 18, leader)
+        painter.drawText(int(mid - 22), y + 18, f"{abs(delta) * 100:.1f}%")
 
-def simulate(cfg):
-    w,tire,track=WEATHER[cfg["weather"]],TIRES[cfg["tireName"]],track_layout(cfg["trackName"])
-    ref=reference_adjustments(cfg["trackName"],cfg["teamName"])
-    top_speed_kph=ref.get("topSpeedKph") or cfg["topSpeedKph"]
-    fuel_base=(ref.get("fuelPerLapKg") or track["fuelPerLapKg"])*w["fuelFactor"]
-    pit_loss=ref.get("pitLoss") or track["pitLoss"]
-    p=dict(
-        powerW=cfg["power"]*1000,
-        ersW=cfg["ers"]*120000,
-        mass=cfg["mass"],
-        dragEff=cfg["drag"]*w["dragFactor"],
-        downforce=cfg["downforce"]*1.55,
-        traction=cfg["traction"],
-        brakeMS2=cfg["brake"]*11.8*track["brakeStress"],
-        gripEff=tire["grip"]*w["gripFactor"]*tire["warmup"],
-        cornerFactor=1.0+0.06*(cfg["downforce"]-1.0),
-        topSpeedMS=(top_speed_kph*w["topSpeedFactor"])/3.6,
-    )
-    pits=pit_sched(cfg["laps"],cfg["stops"]); st=dict(fuel=cfg["fuel"],wear=0,vEntry=62); laps=[]
-    for lap in range(1,cfg["laps"]+1):
-        ld=dict(lap=lap,segV=dict(straight=0,fast=0,slow=0),segStats={k:dict(d=0,t=0) for k in("straight","fast","slow")},pit=False); lap_t=0; vc=st["vEntry"]
-        for seg in track["segments"]:
-            r=integrate(p,seg,dict(fuel=st["fuel"],wear=st["wear"],vEntry=vc),track); lap_t+=r["t"]; vc=r["vOut"]*(0.70 if seg["type"]=="slow" else 0.84 if seg["type"]=="fast" else 0.90)
-            ld["segStats"][seg["type"]]["d"]+=seg["distanceKm"]*1000; ld["segStats"][seg["type"]]["t"]+=r["t"]
-        for k,ss in ld["segStats"].items(): ld["segV"][k]=(ss["d"]/ss["t"])*3.6 if ss["t"]>0 else 0
-        wear_gain=(tire["wear"]*cfg["degrade"]*w["degFactor"]*track["tyreStress"]*(0.78+0.0048*st["fuel"]))
-        if cfg["weather"]=="wet" and cfg["tireName"] not in ("Intermedio","Lluvia extrema"): wear_gain*=1.15
-        st["wear"]+=wear_gain
-        st["fuel"]=max(0,st["fuel"]-(fuel_base*(0.985+0.00032*lap_t)))
-        if lap in pits: lap_t+=pit_loss; st["wear"]=max(6,st["wear"]*0.18); ld["pit"]=True
-        ld["time"],ld["wear"],ld["fuel"]=lap_t,st["wear"],st["fuel"]; laps.append(ld); st["vEntry"]=max(45,vc)
-    avg={k:sum(l["segV"][k] for l in laps)/len(laps) for k in("straight","fast","slow")}
-    return dict(laps=laps,total=sum(l["time"] for l in laps),best=min(l["time"] for l in laps),avgSegment=avg,pitLaps=pits)
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        grad = QLinearGradient(0, 0, 0, self.height())
+        grad.setColorAt(0, QColor("#0c1b30"))
+        grad.setColorAt(1, QColor(PALETTE["track"]))
+        painter.fillRect(self.rect(), grad)
+        if not self.geo:
+            painter.setPen(QColor(PALETTE["muted"]))
+            painter.drawText(self.rect(), Qt.AlignCenter, "Carga una sesion real y ejecuta la simulacion")
+            return
+        pts = self.geo["points"]
+        path = QPainterPath()
+        path.moveTo(pts[0]["x"], pts[0]["y"])
+        for p in pts[1:]:
+            path.lineTo(p["x"], p["y"])
+        self._draw_track_surface(painter, path)
 
-def build_geo(name,w,h):
-    if REAL_TRACKS.get(name):
-        pts=REAL_TRACKS[name]["pointsMeters"]; mnx,mxx=min(p["x"] for p in pts),max(p["x"] for p in pts); mny,mxy=min(p["y"] for p in pts),max(p["y"] for p in pts)
-        s=min((w-72)/max(1e-6,mxx-mnx),(h-72)/max(1e-6,mxy-mny)); ox=(w-(mxx-mnx)*s)*0.5; oy=(h-(mxy-mny)*s)*0.5
-        m=[dict(x=ox+(p["x"]-mnx)*s,y=oy+(mxy-p["y"])*s) for p in pts]+[dict(x=ox+(pts[0]["x"]-mnx)*s,y=oy+(mxy-pts[0]["y"])*s)]
-    else:
-        pf={"Monza":(0.22,0.08,1.18,0.78,0.2,1.3),"Silverstone":(0.28,0.12,1.03,0.86,0.8,2.2),"Spa-Francorchamps":(0.34,0.14,1.05,0.82,0.55,1.85),"Interlagos":(0.18,0.16,0.98,0.83,1.2,2.65),"Suzuka":(0.30,0.20,1.02,0.88,2.0,0.3)}.get(name,(0.25,0.1,1,0.85,0,1))
-        a1,a2,kx,ky,p1,p2=pf; n=900; cx,cy,sx,sy=w*0.5,h*0.52,w*0.34,h*0.33; m=[]
-        for i in range(n+1):
-            t=i/n*math.pi*2; r=1+a1*math.sin(2*t+p1)+a2*math.sin(3*t+p2)
-            m.append(dict(x=cx+sx*r*kx*math.cos(t)+sx*0.08*math.sin(4*t+0.3),y=cy+sy*r*ky*math.sin(t)+sy*0.05*math.cos(3*t+1.1)))
-    cum=[0]; tot=0
-    for i in range(1,len(m)): tot+=math.hypot(m[i]["x"]-m[i-1]["x"],m[i]["y"]-m[i-1]["y"]); cum.append(tot)
-    return dict(points=m,cum=cum,total=tot)
+        start = point_at(self.geo, 0.02)
+        painter.setPen(QPen(QColor("white"), 2))
+        painter.drawLine(start["x"] - 8, start["y"] - 8, start["x"] + 8, start["y"] + 8)
+        painter.drawLine(start["x"] - 8, start["y"] + 8, start["x"] + 8, start["y"] - 8)
+        painter.setPen(QPen(QColor("#e12d39"), 2, Qt.DashLine))
+        painter.drawLine(start["x"] - 16, start["y"], start["x"] + 16, start["y"])
 
-def point_at(geo,p):
-    s=clamp(p,0,1)*geo["total"]; lo,hi=0,len(geo["cum"])-1
-    while lo<hi:
-        mid=(lo+hi)//2
-        if geo["cum"][mid]<s: lo=mid+1
-        else: hi=mid
-    i=int(clamp(lo,1,len(geo["cum"])-1)); s0,s1=geo["cum"][i-1],geo["cum"][i]; k=(s-s0)/max(1e-6,s1-s0); p0,p1=geo["points"][i-1],geo["points"][i]
-    return dict(x=p0["x"]+(p1["x"]-p0["x"])*k,y=p0["y"]+(p1["y"]-p0["y"])*k,ang=math.atan2(p1["y"]-p0["y"],p1["x"]-p0["x"]))
+        self._draw_trail(painter, self.state_a, QColor(PALETTE["accent"]))
+        self._draw_trail(painter, self.state_b, QColor(PALETTE["cyan"]))
 
-def state_at(res,track,tr):
-    if tr<=0: f=res["laps"][0]; return dict(lap=1,pRace=0,speed=f["segV"]["straight"],pit=False)
-    if tr>=res["total"]: l=res["laps"][-1]; return dict(lap=len(res["laps"]),pRace=1,speed=l["segV"]["slow"],pit=False)
-    fr=[]; acc=0
-    for s in track["segments"]: acc+=s["distanceKm"]/track["lapDistanceKm"]; fr.append((s["type"],acc))
-    sm=0
-    for i,lap in enumerate(res["laps"]):
-        if sm+lap["time"]>=tr:
-            p=(tr-sm)/lap["time"]; stype="slow"
-            for tp,lim in fr:
-                if p<=lim: stype=tp; break
-            return dict(lap=i+1,pRace=(i+p)/len(res["laps"]),speed=lap["segV"][stype],pit=lap["pit"] and p>0.86)
-        sm+=lap["time"]
-    return dict(lap=len(res["laps"]),pRace=1,speed=0,pit=False)
+        for state, team_name, label in ((self.state_a, self.team_a, "A"), (self.state_b, self.team_b, "B")):
+            if not state:
+                continue
+            pos = point_at(self.geo, state["pRace"])
+            lane = 7 if label == "A" else -7
+            x = pos["x"] - math.sin(pos["ang"]) * lane
+            y = pos["y"] + math.cos(pos["ang"]) * lane
+            self._draw_f1_car(painter, x, y, pos["ang"], team_name, label)
+        self._draw_hud(painter)
+        self._draw_driver_panel(painter, "left", "A", self.team_a, self.state_a, PALETTE["accent"])
+        self._draw_driver_panel(painter, "right", "B", self.team_b, self.state_b, PALETTE["cyan"])
+        self._draw_delta_bar(painter)
 
-class App:
-    def __init__(self,r):
-        self.r=r; r.title("F1 Strategy Lab - Python"); r.geometry("1520x940"); r.minsize(1280,780)
-        self.resA=self.resB=self.geo=None; self.track_name="Monza"; self.vrun=True; self.vtime=0; self.last=None; self.after_id=None; self.loaded_ref=None
-        self._ui(); self.apply_car(); self.apply_track_defaults()
-    def _style(self):
-        style=ttk.Style()
-        try: style.theme_use("clam")
-        except: pass
-        bg="#07111f"; shell="#0f1b2d"; card="#14233a"; panel="#1a2d47"; accent="#ff6a3d"; accent_2="#2bd3c6"; ink="#f3f7ff"; muted="#93a9c8"; line="#2b4466"; track="#091423"; success="#49d17d"; warn="#ffb84d"
-        self.palette=dict(bg=bg,shell=shell,card=card,accent=accent,accent_2=accent_2,ink=ink,muted=muted,line=line,panel=panel,track=track,success=success,warn=warn)
-        self.r.configure(bg=bg)
-        style.configure(".", background=bg, foreground=ink, font=("Segoe UI",10), fieldbackground=panel)
-        style.configure("App.TFrame", background=bg)
-        style.configure("Shell.TFrame", background=shell)
-        style.configure("Card.TFrame", background=card, relief="flat")
-        style.configure("Panel.TFrame", background=panel, relief="flat")
-        style.configure("Card.TLabelframe", background=card, borderwidth=1, relief="solid", bordercolor=line, lightcolor=card, darkcolor=card)
-        style.configure("Card.TLabelframe.Label", background=card, foreground=ink, font=("Segoe UI Semibold",10))
-        style.configure("Title.TLabel", background=bg, foreground=ink, font=("Bahnschrift SemiBold",24))
-        style.configure("Sub.TLabel", background=bg, foreground=muted, font=("Segoe UI",10))
-        style.configure("Section.TLabel", background=card, foreground=accent_2, font=("Segoe UI Semibold",9))
-        style.configure("CardTitle.TLabel", background=card, foreground=muted, font=("Segoe UI Semibold",9))
-        style.configure("CardValue.TLabel", background=card, foreground=ink, font=("Bahnschrift SemiBold",18))
-        style.configure("Status.TLabel", background=card, foreground=muted, font=("Segoe UI",9))
-        style.configure("KPIAccent.TFrame", background="#10243b")
-        style.configure("Accent.TButton", background=accent, foreground="white", borderwidth=0, focusthickness=3, focuscolor=accent, padding=(14,10), font=("Segoe UI Semibold",10))
-        style.map("Accent.TButton", background=[("active","#ff7c55"),("pressed","#d9562f")])
-        style.configure("Soft.TButton", background=panel, foreground=ink, bordercolor=line, lightcolor=panel, darkcolor=panel, padding=(11,9), font=("Segoe UI Semibold",10))
-        style.map("Soft.TButton", background=[("active","#223a5b")])
-        style.configure("App.TNotebook", background=bg, borderwidth=0, tabmargins=(0,0,0,0))
-        style.configure("App.TNotebook.Tab", padding=(18,12), font=("Segoe UI Semibold",10), background=shell, foreground=muted)
-        style.map("App.TNotebook.Tab", background=[("selected",card),("active",panel)], foreground=[("selected",ink),("active",ink)])
-        style.configure("Data.Treeview", rowheight=32, font=("Segoe UI",9), background=card, fieldbackground=card, foreground=ink, bordercolor=line)
-        style.configure("Data.Treeview.Heading", font=("Segoe UI Semibold",9), background=panel, foreground=ink, relief="flat")
-        style.map("Data.Treeview", background=[("selected","#263452")], foreground=[("selected",ink)])
-        style.configure("TEntry", padding=7, fieldbackground=panel, foreground=ink, bordercolor=line, lightcolor=panel, darkcolor=panel)
-        style.configure("TCombobox", padding=6, fieldbackground=panel, foreground=ink, bordercolor=line, lightcolor=panel, darkcolor=panel, arrowsize=14)
-        rcParams["font.family"]="Segoe UI"
-    def _add_field(self,parent,label,key,val="",kind="entry",values=None,width=20):
-        wrap=ttk.Frame(parent,style="Card.TFrame"); wrap.grid_columnconfigure(0,weight=1)
-        ttk.Label(wrap,text=label.upper(),style="CardTitle.TLabel").grid(row=0,column=0,sticky="w")
-        self.v[key]=tk.StringVar(value=val)
-        if kind=="combo":
-            w=ttk.Combobox(wrap,textvariable=self.v[key],values=values or [],state="readonly",width=width)
-        else:
-            w=ttk.Entry(wrap,textvariable=self.v[key],width=width)
-        w.grid(row=1,column=0,sticky="ew",pady=(4,0))
-        return wrap,w
-    def _make_scrollable_panel(self,parent,frame_style,canvas_bg,padding=(0,0,0,0)):
-        outer=ttk.Frame(parent,style=frame_style)
-        outer.rowconfigure(0,weight=1); outer.columnconfigure(0,weight=1)
-        canvas=tk.Canvas(outer,bg=canvas_bg,highlightthickness=0,bd=0)
-        scroll=ttk.Scrollbar(outer,orient="vertical",command=canvas.yview)
-        inner=ttk.Frame(canvas,style=frame_style,padding=padding)
-        win=canvas.create_window((0,0),window=inner,anchor="nw")
-        inner.bind("<Configure>",lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>",lambda e: canvas.itemconfigure(win,width=e.width))
-        canvas.configure(yscrollcommand=scroll.set)
-        canvas.grid(row=0,column=0,sticky="nsew")
-        scroll.grid(row=0,column=1,sticky="ns")
-        self._bind_mousewheel(canvas,inner)
-        return outer,canvas,inner
-    def _bind_mousewheel(self,canvas,*widgets):
-        targets=(canvas,*widgets)
-        def on_wheel(event):
-            if event.delta:
-                canvas.yview_scroll(int(-event.delta/120),"units")
-            elif getattr(event,"num",None)==4:
-                canvas.yview_scroll(-3,"units")
-            elif getattr(event,"num",None)==5:
-                canvas.yview_scroll(3,"units")
-        for widget in targets:
-            widget.bind("<Enter>",lambda _e: canvas.bind_all("<MouseWheel>",on_wheel))
-            widget.bind("<Leave>",lambda _e: canvas.unbind_all("<MouseWheel>"))
-    def _ui(self):
-        self._style()
-        self.v={}
-        root=ttk.Frame(self.r,padding=14,style="App.TFrame"); root.pack(fill="both",expand=True)
-        root.columnconfigure(1,weight=1); root.rowconfigure(1,weight=1)
-        header=ttk.Frame(root,style="App.TFrame"); header.grid(row=0,column=0,columnspan=2,sticky="ew",pady=(0,12))
-        ttk.Label(header,text="F1 Strategy Lab",style="Title.TLabel").grid(row=0,column=0,sticky="w")
-        ttk.Label(header,text="Telemetria real, comparacion de estrategias y una lectura mas clara de la carrera.",style="Sub.TLabel").grid(row=1,column=0,sticky="w",pady=(2,0))
-        shell=ttk.Panedwindow(root,orient="horizontal"); shell.grid(row=1,column=0,columnspan=2,sticky="nsew")
-        left_outer=ttk.Frame(shell,style="Shell.TFrame",width=360); right=ttk.Frame(shell,style="App.TFrame")
-        shell.add(left_outer,weight=0); shell.add(right,weight=1)
-        left_outer.rowconfigure(0,weight=1); left_outer.columnconfigure(0,weight=1)
-        left_panel,left_canvas,left=self._make_scrollable_panel(left_outer,"Shell.TFrame",self.palette["shell"],padding=(10,10,12,10))
-        left_panel.grid(row=0,column=0,sticky="nsew")
-        left_canvas.configure(width=360)
-        self.left_panel=left
-        left.columnconfigure(0,weight=1)
 
-        data_card=ttk.LabelFrame(left,text="Datos Reales",padding=12,style="Card.TLabelframe"); data_card.grid(row=0,column=0,sticky="ew",pady=(0,10)); data_card.columnconfigure((0,1),weight=1)
-        self._add_field(data_card,"Temporada","year","2025")[0].grid(row=0,column=0,sticky="ew",padx=(0,6),pady=(0,8))
-        self._add_field(data_card,"Sesion","session","Q","combo",["Q","R","FP1","FP2","FP3","SQ","S"])[0].grid(row=0,column=1,sticky="ew",pady=(0,8))
-        event_values=[]
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("F1 Strategy Lab - PySide6")
+        self.resize(1560, 960)
+        self.setMinimumSize(1040, 700)
+        self.loaded_ref = None
+        self.res_a = None
+        self.res_b = None
+        self.track_name = "Monza"
+        self.geo = None
+        self.vtime = 0.0
+        self.vrun = True
+        self.last_ts = None
+        self.event_values = []
+        self.fields = {}
+        self._build_ui()
+        self.apply_team()
+        self.apply_track_defaults()
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.frame_update)
+        self.timer.start(16)
+
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(12)
+
+        title = QLabel("F1 Strategy Lab")
+        title.setObjectName("title")
+        self.title_label = title
+        subtitle = QLabel("Telemetria real con FastF1, comparacion de estrategias y dashboard tecnico moderno.")
+        subtitle.setObjectName("subtitle")
+        subtitle.setWordWrap(True)
+        self.subtitle_label = subtitle
+        root.addWidget(title)
+        root.addWidget(subtitle)
+
+        splitter = QSplitter(Qt.Horizontal)
+        root.addWidget(splitter, 1)
+        self.main_splitter = splitter
+
+        sidebar_shell = QFrame()
+        sidebar_shell.setObjectName("shell")
+        self.sidebar_shell = sidebar_shell
+        sidebar_shell.setMinimumWidth(300)
+        sidebar_shell.setMaximumWidth(460)
+        sidebar_layout = QVBoxLayout(sidebar_shell)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_content = QFrame()
+        sidebar_content.setObjectName("sidebar")
+        s = QVBoxLayout(sidebar_content)
+        s.setContentsMargins(12, 12, 12, 12)
+        s.setSpacing(12)
+        sidebar_scroll.setWidget(sidebar_content)
+        sidebar_layout.addWidget(sidebar_scroll)
+        splitter.addWidget(sidebar_shell)
+
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.right_scroll = right_scroll
+        right = QWidget()
+        right.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        right_scroll.setWidget(right)
+        splitter.addWidget(right_scroll)
+        splitter.setStretchFactor(1, 1)
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        splitter.setSizes([360, 1180])
+        self.right_panel = right
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(12)
+
+        s.addWidget(self._real_data_card())
+        s.addWidget(self._car_card())
+        s.addWidget(self._strategy_card())
+        s.addWidget(self._actions_card())
+        s.addStretch(1)
+
+        self.kpi_host = QWidget()
+        self.kpi_grid = QGridLayout(self.kpi_host)
+        self.kpi_grid.setContentsMargins(0, 0, 0, 0)
+        self.kpi_grid.setHorizontalSpacing(10)
+        self.kpi_grid.setVerticalSpacing(10)
+        self.kpis = {
+            "ta": KpiCard("Tiempo total A", PALETTE["accent"]),
+            "tb": KpiCard("Tiempo total B", PALETTE["cyan"]),
+            "df": KpiCard("Diferencia", PALETTE["green"]),
+            "ba": KpiCard("Mejor vuelta A", PALETTE["accent"]),
+            "bb": KpiCard("Mejor vuelta B", PALETTE["cyan"]),
+        }
+        right_layout.addWidget(self.kpi_host)
+
+        brief = Card("Race Brief")
+        self.note = QLabel("Listo para cargar una sesion real y comparar estrategias.")
+        self.note.setObjectName("muted")
+        self.note.setWordWrap(True)
+        brief.layout.addWidget(self.note)
+        right_layout.addWidget(brief)
+
+        tabs = QTabWidget()
+        right_layout.addWidget(tabs, 1)
+
+        sim_tab = QWidget()
+        sim_layout = QVBoxLayout(sim_tab)
+        sim_layout.setContentsMargins(0, 0, 0, 0)
+        sim_layout.setSpacing(12)
+        sim_card = Card("Simulacion Visual")
+        sim_controls = QHBoxLayout()
+        self.play_btn = QPushButton("Pausar")
+        self.play_btn.clicked.connect(self.toggle_play)
+        self.reset_btn = QPushButton("Reiniciar")
+        self.reset_btn.clicked.connect(self.restart_view)
+        self.speed_combo = QComboBox()
+        self.speed_combo.addItems(["12", "20", "30", "45"])
+        self.speed_combo.setCurrentText("20")
+        sim_controls.addWidget(self.play_btn)
+        sim_controls.addWidget(self.reset_btn)
+        sim_controls.addStretch(1)
+        sim_controls.addWidget(QLabel("Velocidad"))
+        sim_controls.addWidget(self.speed_combo)
+        sim_card.layout.addLayout(sim_controls)
+        self.track_widget = TrackWidget()
+        sim_card.layout.addWidget(self.track_widget)
+        self.vmsg = QLabel("Listo para simular.")
+        self.vmsg.setObjectName("muted")
+        sim_card.layout.addWidget(self.vmsg)
+        sim_layout.addWidget(sim_card)
+        tabs.addTab(sim_tab, "Simulacion")
+
+        analysis_tab = QWidget()
+        analysis_layout = QVBoxLayout(analysis_tab)
+        analysis_layout.setContentsMargins(0, 0, 0, 0)
+        analysis_layout.setSpacing(12)
+        charts_card = Card("Graficos")
+        self.figure = Figure(figsize=(10, 5), dpi=100, facecolor=PALETTE["card"])
+        self.axes = [self.figure.add_subplot(221), self.figure.add_subplot(222), self.figure.add_subplot(223), self.figure.add_subplot(224)]
+        self.canvas = FigureCanvasQTAgg(self.figure)
+        charts_card.layout.addWidget(self.canvas)
+        analysis_layout.addWidget(charts_card, 1)
+        table_card = Card("Detalle Por Vuelta")
+        self.table = QTableWidget(0, 11)
+        self.table.setHorizontalHeaderLabels(["Vuelta", "A tiempo", "A desgaste", "A combustible", "A goma", "A parada", "B tiempo", "B desgaste", "B combustible", "B goma", "B parada"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setHorizontalScrollMode(QTableWidget.ScrollPerPixel)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        table_card.layout.addWidget(self.table)
+        analysis_layout.addWidget(table_card, 1)
+        tabs.addTab(analysis_tab, "Analisis")
+        self.relayout_kpis()
+        self.update_responsive_layout()
+
+    def _add_field(self, key, widget):
+        self.fields[key] = widget
+        return widget
+
+    def _real_data_card(self):
+        card = Card("Datos Reales")
+        grid = QGridLayout()
+        self.real_grid = grid
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+
+        year = self._add_field("year", QLineEdit("2025"))
+        session = self._add_field("session", QComboBox())
+        session.addItems(["Q", "R", "FP1", "FP2", "FP3", "SQ", "S"])
+        event = self._add_field("event", QComboBox())
         for aliases in TRACK_EVENT_ALIASES.values():
             for alias in aliases:
-                if alias not in event_values: event_values.append(alias)
-        self._add_field(data_card,"Evento FastF1","event","Monza","combo",event_values,26)[0].grid(row=1,column=0,columnspan=2,sticky="ew",pady=(0,8))
-        rf=ttk.Frame(data_card,style="Card.TFrame"); rf.grid(row=2,column=0,columnspan=2,sticky="ew",pady=(0,8)); rf.columnconfigure((0,1),weight=1)
-        ttk.Button(rf,text="Cargar Datos",command=self.fetch_real_data,style="Accent.TButton").grid(row=0,column=0,sticky="ew",padx=(0,4))
-        ttk.Button(rf,text="Refrescar",command=lambda:self.fetch_real_data(force=True),style="Soft.TButton").grid(row=0,column=1,sticky="ew",padx=(4,0))
-        self.real_status=tk.StringVar(value="Datos reales: no cargados")
-        ttk.Label(data_card,text="LIVE DATA",style="Section.TLabel").grid(row=3,column=0,columnspan=2,sticky="w",pady=(2,2))
-        ttk.Label(data_card,textvariable=self.real_status,style="Status.TLabel",wraplength=300,justify="left").grid(row=4,column=0,columnspan=2,sticky="ew")
+                if alias not in self.event_values:
+                    self.event_values.append(alias)
+        event.addItems(self.event_values)
+        event.setCurrentText("Monza")
 
-        car_card=ttk.LabelFrame(left,text="Auto Y Circuito",padding=12,style="Card.TLabelframe"); car_card.grid(row=1,column=0,sticky="ew",pady=(0,10)); car_card.columnconfigure((0,1),weight=1)
-        self._add_field(car_card,"Equipo 2026","car","Ferrari","combo",list(TEAMS.keys()),18)[0].grid(row=0,column=0,columnspan=2,sticky="ew",pady=(0,8))
-        ttk.Button(car_card,text="Aplicar Equipo",command=self.apply_car,style="Soft.TButton").grid(row=1,column=0,columnspan=2,sticky="ew",pady=(0,8))
-        self._add_field(car_card,"Circuito","track","Monza","combo",list(TRACKS.keys()),18)[0].grid(row=2,column=0,sticky="ew",padx=(0,6),pady=(0,8))
-        self._add_field(car_card,"Clima","weather","dry","combo",list(WEATHER.keys()),18)[0].grid(row=2,column=1,sticky="ew",pady=(0,8))
-        self._add_field(car_card,"Vueltas","laps",str(TRACKS["Monza"]["raceLaps"]))[0].grid(row=3,column=0,sticky="ew",padx=(0,6),pady=(0,8))
-        ttk.Button(car_card,text="Aplicar Circuito",command=self.apply_track_defaults,style="Soft.TButton").grid(row=3,column=1,sticky="ew",pady=(0,8))
-        perf=ttk.Frame(car_card,style="Card.TFrame"); perf.grid(row=4,column=0,columnspan=2,sticky="ew"); perf.columnconfigure((0,1),weight=1)
-        fields=[("Potencia (kW)","power"),("Masa (kg)","mass"),("Drag CdA","drag"),("Carga aero","downforce"),("Traccion","traction"),("Frenado","brake"),("ERS","ers"),("Vel punta (km/h)","topSpeedKph")]
-        for idx,(label,key) in enumerate(fields):
-            widget=self._add_field(perf,label,key)[0]
-            widget.grid(row=idx//2,column=idx%2,sticky="ew",padx=(0,6) if idx%2==0 else (6,0),pady=(0,8))
+        self.real_field_year = Field("Temporada", year)
+        self.real_field_session = Field("Sesion", session)
+        self.real_field_event = Field("Evento FastF1", event)
+        grid.addWidget(self.real_field_year, 0, 0)
+        grid.addWidget(self.real_field_session, 0, 1)
+        grid.addWidget(self.real_field_event, 1, 0, 1, 2)
 
-        strat_card=ttk.LabelFrame(left,text="Estrategias",padding=12,style="Card.TLabelframe"); strat_card.grid(row=2,column=0,sticky="ew",pady=(0,10)); strat_card.columnconfigure((0,1),weight=1)
-        ttk.Label(strat_card,text="Plan A",style="CardTitle.TLabel").grid(row=0,column=0,sticky="w",pady=(0,6))
-        ttk.Label(strat_card,text="Plan B",style="CardTitle.TLabel").grid(row=0,column=1,sticky="w",pady=(0,6))
-        plan_a=ttk.Frame(strat_card,style="Card.TFrame"); plan_b=ttk.Frame(strat_card,style="Card.TFrame")
-        plan_a.grid(row=1,column=0,sticky="nsew",padx=(0,6)); plan_b.grid(row=1,column=1,sticky="nsew",padx=(6,0))
-        for idx,(label,key,val,values) in enumerate([("Neumatico","tireA","C3 Medium",list(TIRES.keys())),("Combustible","fuelA","100",None),("Paradas","stopsA","1",None),("Degradacion","degradeA","1.0",None)]):
-            self._add_field(plan_a,label,key,val,"combo" if values else "entry",values,16)[0].grid(row=idx,column=0,sticky="ew",pady=(0,8))
-        for idx,(label,key,val,values) in enumerate([("Neumatico","tireB","C4 Soft",list(TIRES.keys())),("Combustible","fuelB","100",None),("Paradas","stopsB","2",None),("Degradacion","degradeB","1.0",None)]):
-            self._add_field(plan_b,label,key,val,"combo" if values else "entry",values,16)[0].grid(row=idx,column=0,sticky="ew",pady=(0,8))
-        actions=ttk.Frame(left,style="Shell.TFrame"); actions.grid(row=3,column=0,sticky="ew",pady=(0,12)); actions.columnconfigure((0,1),weight=1)
-        ttk.Button(actions,text="Simular",command=self.run,style="Accent.TButton").grid(row=0,column=0,sticky="ew",padx=(0,4))
-        ttk.Button(actions,text="Intercambiar A/B",command=self.swap,style="Soft.TButton").grid(row=0,column=1,sticky="ew",padx=(4,0))
+        btn_row = QHBoxLayout()
+        load_btn = QPushButton("Cargar Datos")
+        load_btn.setObjectName("accent")
+        load_btn.clicked.connect(self.fetch_real_data)
+        refresh_btn = QPushButton("Refrescar")
+        refresh_btn.clicked.connect(lambda: self.fetch_real_data(True))
+        btn_row.addWidget(load_btn)
+        btn_row.addWidget(refresh_btn)
 
-        right.columnconfigure(0,weight=1); right.rowconfigure(2,weight=1)
-        k=ttk.Frame(right,style="App.TFrame"); k.grid(row=0,column=0,sticky="ew",pady=(0,10)); [k.columnconfigure(i,weight=1) for i in range(5)]
-        self.k={n:tk.StringVar(value="-") for n in("ta","tb","df","ba","bb")}
-        for i,(t,n) in enumerate([("Tiempo total A","ta"),("Tiempo total B","tb"),("Diferencia","df"),("Mejor vuelta A","ba"),("Mejor vuelta B","bb")]):
-            f=ttk.Frame(k,style="KPIAccent.TFrame",padding=12); f.grid(row=0,column=i,sticky="ew",padx=4)
-            bar=tk.Frame(f,bg=self.palette["accent"] if n in ("ta","ba") else self.palette["accent_2"] if n in ("tb","bb") else self.palette["success"],height=3)
-            bar.pack(fill="x",side="top",anchor="n",pady=(0,10))
-            ttk.Label(f,text=t.upper(),style="CardTitle.TLabel").pack(anchor="w")
-            ttk.Label(f,textvariable=self.k[n],style="CardValue.TLabel").pack(anchor="w",pady=(8,0))
-        summary=ttk.Frame(right,style="Card.TFrame",padding=12); summary.grid(row=1,column=0,sticky="ew",pady=(0,10))
-        self.note=tk.StringVar(value="Listo para cargar una sesion real y comparar estrategias.")
-        ttk.Label(summary,text="RACE BRIEF",style="Section.TLabel").pack(anchor="w")
-        ttk.Label(summary,textvariable=self.note,style="Status.TLabel",wraplength=960,justify="left").pack(anchor="w",pady=(6,0))
-        notebook=ttk.Notebook(right,style="App.TNotebook"); notebook.grid(row=2,column=0,sticky="nsew")
-        sim_tab=ttk.Frame(notebook,style="App.TFrame",padding=2); analysis_tab=ttk.Frame(notebook,style="App.TFrame",padding=2)
-        notebook.add(sim_tab,text="Simulacion"); notebook.add(analysis_tab,text="Analisis")
-        sim_tab.columnconfigure(0,weight=1); sim_tab.rowconfigure(1,weight=1)
-        vc=ttk.LabelFrame(sim_tab,text="Simulacion Visual",padding=10,style="Card.TLabelframe"); vc.grid(row=0,column=0,sticky="ew")
-        top=ttk.Frame(vc,style="Card.TFrame"); top.pack(fill="x",pady=(0,8))
-        self.play=ttk.Button(top,text="Pausar",command=self.toggle); self.play.pack(side="left",padx=(0,4)); ttk.Button(top,text="Reiniciar",command=self.restart_btn).pack(side="left")
-        ttk.Label(top,text="Velocidad").pack(side="left",padx=(8,4)); self.speed=tk.StringVar(value="20"); cb=ttk.Combobox(top,textvariable=self.speed,values=["12","20","30","45"],state="readonly",width=8); cb.pack(side="left")
-        self.cv=tk.Canvas(vc,height=320,bg=self.palette["track"],highlightthickness=1,highlightbackground="#32486e"); self.cv.pack(fill="x")
-        self.vmsg=tk.StringVar(value="Listo para simular."); ttk.Label(vc,textvariable=self.vmsg,style="Status.TLabel").pack(anchor="w",pady=(8,0))
-        analysis_panel,analysis_canvas,analysis_body=self._make_scrollable_panel(analysis_tab,"App.TFrame",self.palette["bg"],padding=(0,0,8,0))
-        analysis_panel.pack(fill="both",expand=True)
-        analysis_body.columnconfigure(0,weight=1)
-        ch=ttk.LabelFrame(analysis_body,text="Graficos",padding=10,style="Card.TLabelframe"); ch.grid(row=0,column=0,sticky="ew",pady=(0,10))
-        self.fig=Figure(figsize=(10,5),dpi=100); self.ax=[self.fig.add_subplot(221),self.fig.add_subplot(222),self.fig.add_subplot(223),self.fig.add_subplot(224)]; self.fig.tight_layout(pad=2)
-        self.fc=FigureCanvasTkAgg(self.fig,master=ch); self.fc.get_tk_widget().pack(fill="both",expand=True)
-        tb=ttk.LabelFrame(analysis_body,text="Detalle Por Vuelta",padding=10,style="Card.TLabelframe"); tb.grid(row=1,column=0,sticky="ew")
-        cols=("lap","at","aw","af","ap","bt","bw","bf","bp"); self.tv=ttk.Treeview(tb,columns=cols,show="headings",height=11,style="Data.Treeview")
-        for c,h,w in [("lap","Vuelta",60),("at","A tiempo",95),("aw","A desgaste",95),("af","A combustible",100),("ap","A parada",80),("bt","B tiempo",95),("bw","B desgaste",95),("bf","B combustible",100),("bp","B parada",80)]:
-            self.tv.heading(c,text=h); self.tv.column(c,width=w,anchor="center")
-        ys=ttk.Scrollbar(tb,orient="vertical",command=self.tv.yview); self.tv.configure(yscrollcommand=ys.set); self.tv.pack(side="left",fill="both",expand=True); ys.pack(side="left",fill="y",padx=(8,0))
-    def apply_car(self):
-        c=TEAMS[self.v["car"].get()]
-        self.v["power"].set(str(c["power"])); self.v["mass"].set(str(c["mass"])); self.v["drag"].set(str(c["drag"]))
-        self.v["downforce"].set(str(c["downforce"])); self.v["traction"].set(str(c["traction"])); self.v["brake"].set(str(c["brake"]))
-        self.v["ers"].set(str(c["ers"])); self.v["topSpeedKph"].set(str(int(348-(c["drag"]-0.81)*80+(c["power"]-748)*0.9)))
-    def apply_track_defaults(self):
-        track=self.v["track"].get()
-        t=track_layout(track); self.v["laps"].set(str(t["raceLaps"]))
-        aliases=TRACK_EVENT_ALIASES.get(track,[track])
-        if self.v["event"].get() not in aliases: self.v["event"].set(aliases[0])
-    def cfg(self,s):
+        self.real_status = QLabel("Datos reales: no cargados")
+        self.real_status.setObjectName("muted")
+        self.real_status.setWordWrap(True)
+
+        card.layout.addLayout(grid)
+        card.layout.addLayout(btn_row)
+        card.layout.addWidget(self.real_status)
+        return card
+
+    def _car_card(self):
+        card = Card("Auto Y Circuito")
+        grid = QGridLayout()
+        self.car_grid = grid
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+
+        team = self._add_field("car", QComboBox())
+        team.addItems(list(TEAMS.keys()))
+        team.setCurrentText("Ferrari")
+        circuit = self._add_field("track", QComboBox())
+        circuit.addItems(list(TRACKS.keys()))
+        circuit.setCurrentText("Monza")
+        weather = self._add_field("weather", QComboBox())
+        weather.addItems(list(WEATHER.keys()))
+        weather.setCurrentText("dry")
+        laps = self._add_field("laps", QLineEdit(str(TRACKS["Monza"]["raceLaps"])))
+
+        apply_team = QPushButton("Aplicar Equipo")
+        apply_team.clicked.connect(self.apply_team)
+        apply_track = QPushButton("Aplicar Circuito")
+        apply_track.clicked.connect(self.apply_track_defaults)
+        self.apply_team_btn = apply_team
+        self.apply_track_btn = apply_track
+
+        perf_keys = [
+            ("power", "Potencia (kW)"),
+            ("mass", "Masa (kg)"),
+            ("drag", "Drag CdA"),
+            ("downforce", "Carga aero"),
+            ("traction", "Traccion"),
+            ("brake", "Frenado"),
+            ("ers", "ERS"),
+            ("topSpeedKph", "Vel punta (km/h)"),
+        ]
+        perf_widgets = {key: self._add_field(key, QLineEdit()) for key, _ in perf_keys}
+
+        self.car_field_team = Field("Equipo 2026", team)
+        self.car_field_track = Field("Circuito", circuit)
+        self.car_field_weather = Field("Clima", weather)
+        self.car_field_laps = Field("Vueltas", laps)
+        grid.addWidget(self.car_field_team, 0, 0, 1, 2)
+        grid.addWidget(apply_team, 1, 0, 1, 2)
+        grid.addWidget(self.car_field_track, 2, 0)
+        grid.addWidget(self.car_field_weather, 2, 1)
+        grid.addWidget(self.car_field_laps, 3, 0)
+        grid.addWidget(apply_track, 3, 1)
+
+        base = 4
+        self.perf_field_widgets = []
+        for idx, (key, label) in enumerate(perf_keys):
+            field = Field(label, perf_widgets[key])
+            self.perf_field_widgets.append(field)
+            grid.addWidget(field, base + idx // 2, idx % 2)
+
+        card.layout.addLayout(grid)
+        return card
+
+    def _strategy_card(self):
+        card = Card("Estrategias")
+        row = QBoxLayout(QBoxLayout.LeftToRight)
+        row.setSpacing(10)
+        self.strategy_row = row
+        plan_a = Card("Plan A")
+        plan_b = Card("Plan B")
+        self.plan_a_card = plan_a
+        self.plan_b_card = plan_b
+        plan_a.setObjectName("card")
+        plan_b.setObjectName("card")
+        self.plan_field_wrappers = {"A": {}, "B": {}}
+
+        for key, label, default, values in [
+            ("tireA", "Neumatico", "C3 Medium", list(TIRES.keys())),
+            ("fuelA", "Combustible", "100", None),
+            ("stopsA", "Paradas", "1", None),
+            ("degradeA", "Degradacion", "1.0", None),
+            ("pitTire1A", "Goma Pit 1", "C2 Hard", list(TIRES.keys())),
+            ("pitTire2A", "Goma Pit 2", "C3 Medium", list(TIRES.keys())),
+            ("pitTire3A", "Goma Pit 3", "C4 Soft", list(TIRES.keys())),
+        ]:
+            widget = QComboBox() if values else QLineEdit(default)
+            if values:
+                widget.addItems(values)
+                widget.setCurrentText(default)
+            self._add_field(key, widget)
+            field = Field(label, widget)
+            plan_a.layout.addWidget(field)
+            self.plan_field_wrappers["A"][key] = field
+
+        for key, label, default, values in [
+            ("tireB", "Neumatico", "C4 Soft", list(TIRES.keys())),
+            ("fuelB", "Combustible", "100", None),
+            ("stopsB", "Paradas", "2", None),
+            ("degradeB", "Degradacion", "1.0", None),
+            ("pitTire1B", "Goma Pit 1", "C3 Medium", list(TIRES.keys())),
+            ("pitTire2B", "Goma Pit 2", "C2 Hard", list(TIRES.keys())),
+            ("pitTire3B", "Goma Pit 3", "C4 Soft", list(TIRES.keys())),
+        ]:
+            widget = QComboBox() if values else QLineEdit(default)
+            if values:
+                widget.addItems(values)
+                widget.setCurrentText(default)
+            self._add_field(key, widget)
+            field = Field(label, widget)
+            plan_b.layout.addWidget(field)
+            self.plan_field_wrappers["B"][key] = field
+
+        row.addWidget(plan_a, 1)
+        row.addWidget(plan_b, 1)
+        card.layout.addLayout(row)
+        self._wire_stop_fields()
+        return card
+
+    def _actions_card(self):
+        shell = QFrame()
+        shell.setObjectName("sidebar")
+        layout = QBoxLayout(QBoxLayout.LeftToRight, shell)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        self.actions_layout = layout
+        simulate_btn = QPushButton("Simular")
+        simulate_btn.setObjectName("accent")
+        simulate_btn.clicked.connect(self.run_simulation)
+        swap_btn = QPushButton("Intercambiar A/B")
+        swap_btn.clicked.connect(self.swap_plans)
+        layout.addWidget(simulate_btn)
+        layout.addWidget(swap_btn)
+        return shell
+
+    def relayout_kpis(self):
+        while self.kpi_grid.count():
+            item = self.kpi_grid.takeAt(0)
+            if item.widget():
+                item.widget().setParent(self.kpi_host)
+        width = max(1, self.kpi_host.width() or self.width())
+        columns = 5 if width >= 1500 else 3 if width >= 1100 else 2
+        keys = ("ta", "tb", "df", "ba", "bb")
+        for idx, key in enumerate(keys):
+            row = idx // columns
+            col = idx % columns
+            self.kpi_grid.addWidget(self.kpis[key], row, col)
+        for col in range(columns):
+            self.kpi_grid.setColumnStretch(col, 1)
+
+    def update_responsive_layout(self):
+        width = self.width()
+        compact = width < 1450
+        dense = width < 1220
+        sidebar_single_col = width < 1320
+
+        title_font = QFont("Bahnschrift SemiBold", 18 if dense else 20 if compact else 24)
+        self.title_label.setFont(title_font)
+        self.subtitle_label.setMaximumWidth(900 if not compact else 620)
+
+        if compact:
+            self.sidebar_shell.setMaximumWidth(360 if not dense else 340)
+            self.sidebar_shell.setMinimumWidth(320 if dense else 300)
+            self.strategy_row.setDirection(QBoxLayout.TopToBottom)
+            self.actions_layout.setDirection(QBoxLayout.TopToBottom if dense else QBoxLayout.LeftToRight)
+        else:
+            self.sidebar_shell.setMaximumWidth(460)
+            self.sidebar_shell.setMinimumWidth(300)
+            self.strategy_row.setDirection(QBoxLayout.LeftToRight)
+            self.actions_layout.setDirection(QBoxLayout.LeftToRight)
+
+        self.plan_a_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.plan_b_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        value_size = 14 if dense else 16 if compact else 18
+        value_font = QFont("Bahnschrift SemiBold", value_size)
+        for card in self.kpis.values():
+            card.value.setFont(value_font)
+        self.update_sidebar_grids(sidebar_single_col)
+        self.relayout_kpis()
+
+    def update_sidebar_grids(self, single_col):
+        if single_col:
+            self.real_grid.addWidget(self.real_field_year, 0, 0)
+            self.real_grid.addWidget(self.real_field_session, 1, 0)
+            self.real_grid.addWidget(self.real_field_event, 2, 0)
+
+            self.car_grid.addWidget(self.car_field_team, 0, 0, 1, 2)
+            self.car_grid.addWidget(self.apply_team_btn, 1, 0, 1, 2)
+            self.car_grid.addWidget(self.car_field_track, 2, 0, 1, 2)
+            self.car_grid.addWidget(self.car_field_weather, 3, 0, 1, 2)
+            self.car_grid.addWidget(self.car_field_laps, 4, 0)
+            self.car_grid.addWidget(self.apply_track_btn, 4, 1)
+            base = 5
+            for idx, field in enumerate(self.perf_field_widgets):
+                self.car_grid.addWidget(field, base + idx, 0, 1, 2)
+        else:
+            self.real_grid.addWidget(self.real_field_year, 0, 0)
+            self.real_grid.addWidget(self.real_field_session, 0, 1)
+            self.real_grid.addWidget(self.real_field_event, 1, 0, 1, 2)
+
+            self.car_grid.addWidget(self.car_field_team, 0, 0, 1, 2)
+            self.car_grid.addWidget(self.apply_team_btn, 1, 0, 1, 2)
+            self.car_grid.addWidget(self.car_field_track, 2, 0)
+            self.car_grid.addWidget(self.car_field_weather, 2, 1)
+            self.car_grid.addWidget(self.car_field_laps, 3, 0)
+            self.car_grid.addWidget(self.apply_track_btn, 3, 1)
+            base = 4
+            for idx, field in enumerate(self.perf_field_widgets):
+                self.car_grid.addWidget(field, base + idx // 2, idx % 2)
+
+    def field_text(self, key):
+        widget = self.fields[key]
+        return widget.currentText() if isinstance(widget, QComboBox) else widget.text()
+
+    def set_field_text(self, key, value):
+        widget = self.fields[key]
+        if isinstance(widget, QComboBox):
+            widget.setCurrentText(str(value))
+        else:
+            widget.setText(str(value))
+        if key in ("stopsA", "stopsB"):
+            self.update_stint_fields(key[-1])
+
+    def _wire_stop_fields(self):
+        self.fields["stopsA"].editingFinished.connect(lambda: self.update_stint_fields("A"))
+        self.fields["stopsB"].editingFinished.connect(lambda: self.update_stint_fields("B"))
+        self.update_stint_fields("A")
+        self.update_stint_fields("B")
+
+    def update_stint_fields(self, suffix):
         try:
-            return dict(teamName=self.v["car"].get(),power=float(self.v["power"].get()),mass=float(self.v["mass"].get()),drag=float(self.v["drag"].get()),downforce=float(self.v["downforce"].get()),traction=float(self.v["traction"].get()),brake=float(self.v["brake"].get()),ers=float(self.v["ers"].get()),topSpeedKph=float(self.v["topSpeedKph"].get()),trackName=self.v["track"].get(),laps=int(float(self.v["laps"].get())),weather=self.v["weather"].get(),tireName=self.v["tireA" if s=="A" else "tireB"].get(),fuel=float(self.v["fuelA" if s=="A" else "fuelB"].get()),stops=int(float(self.v["stopsA" if s=="A" else "stopsB"].get())),degrade=float(self.v["degradeA" if s=="A" else "degradeB"].get()))
-        except: raise ValueError("Revisa los valores numericos.")
-    def fetch_real_data(self,force=False):
-        track=self.v["track"].get(); year=int(float(self.v["year"].get())); event=self.v["event"].get().strip(); session=self.v["session"].get().strip()
+            stops = max(0, min(3, int(float(self.field_text(f"stops{suffix}")))))
+        except Exception:
+            stops = 0
+        for idx in range(1, 4):
+            key = f"pitTire{idx}{suffix}"
+            widget = self.fields[key]
+            wrapper = self.plan_field_wrappers[suffix][key]
+            enabled = idx <= stops
+            wrapper.setVisible(enabled)
+            widget.setEnabled(enabled)
+
+    def apply_team(self):
+        c = TEAMS[self.field_text("car")]
+        self.set_field_text("power", c["power"])
+        self.set_field_text("mass", c["mass"])
+        self.set_field_text("drag", c["drag"])
+        self.set_field_text("downforce", c["downforce"])
+        self.set_field_text("traction", c["traction"])
+        self.set_field_text("brake", c["brake"])
+        self.set_field_text("ers", c["ers"])
+        self.set_field_text("topSpeedKph", int(348 - (c["drag"] - 0.81) * 80 + (c["power"] - 748) * 0.9))
+
+    def apply_track_defaults(self):
+        track = self.field_text("track")
+        t = track_layout(track)
+        self.set_field_text("laps", t["raceLaps"])
+        aliases = TRACK_EVENT_ALIASES.get(track, [track])
+        if self.field_text("event") not in aliases:
+            self.set_field_text("event", aliases[0])
+
+    def build_cfg(self, suffix):
+        try:
+            return dict(
+                teamName=self.field_text("car"),
+                power=float(self.field_text("power")),
+                mass=float(self.field_text("mass")),
+                drag=float(self.field_text("drag")),
+                downforce=float(self.field_text("downforce")),
+                traction=float(self.field_text("traction")),
+                brake=float(self.field_text("brake")),
+                ers=float(self.field_text("ers")),
+                topSpeedKph=float(self.field_text("topSpeedKph")),
+                trackName=self.field_text("track"),
+                laps=int(float(self.field_text("laps"))),
+                weather=self.field_text("weather"),
+                tireName=self.field_text(f"tire{suffix}"),
+                pitTire1=self.field_text(f"pitTire1{suffix}"),
+                pitTire2=self.field_text(f"pitTire2{suffix}"),
+                pitTire3=self.field_text(f"pitTire3{suffix}"),
+                fuel=float(self.field_text(f"fuel{suffix}")),
+                stops=int(float(self.field_text(f"stops{suffix}"))),
+                degrade=float(self.field_text(f"degrade{suffix}")),
+            )
+        except Exception as exc:
+            raise ValueError("Revisa los valores numericos.") from exc
+
+    def fetch_real_data(self, force=False):
+        track = self.field_text("track")
+        year = int(float(self.field_text("year")))
+        session = self.field_text("session").strip()
+        event = self.field_text("event").strip()
         if not force:
-            ref=load_reference_profile(track)
-            if ref and int(ref.get("year",0))==year and str(ref.get("session","")).upper()==session.upper():
-                self.loaded_ref=ref
-                self.real_status.set(f"Datos reales: {track} {year} {session} ya cargados")
-                REAL_TRACKS[track]=build_track_from_points(track)
+            ref = load_reference_profile(track)
+            if ref and int(ref.get("year", 0)) == year and str(ref.get("session", "")).upper() == session.upper():
+                self.loaded_ref = ref
+                self.real_status.setText(f"Datos reales: {track} {year} {session} ya cargados")
+                refresh_real_track(track)
                 return ref
-        self.real_status.set(f"Cargando datos reales: {event} {year} {session} ...")
-        self.r.update_idletasks()
+        self.real_status.setText(f"Cargando datos reales: {event} {year} {session} ...")
+        QApplication.processEvents()
         try:
             build_reference(year, event, session, CACHE_DIR, output_name=track)
-            REAL_TRACKS[track]=build_track_from_points(track)
-            ref=load_reference_profile(track)
+            refresh_real_track(track)
+            ref = load_reference_profile(track)
             if not ref:
                 raise RuntimeError("Se descargo la referencia pero no pudo leerse desde disco.")
-            self.loaded_ref=ref
-            self.real_status.set(f"Datos reales: {track} {year} {session} listos")
+            self.loaded_ref = ref
+            self.real_status.setText(f"Datos reales: {track} {year} {session} listos")
             return ref
-        except Exception as e:
-            self.real_status.set("Datos reales: error de carga")
-            raise RuntimeError(
-                "No se pudieron cargar datos reales con FastF1. "
-                "Verifica que FastF1 este instalado y que haya acceso a internet."
-            ) from e
-    def run(self):
-        try:
-            self.fetch_real_data(force=False)
-            a,b=self.cfg("A"),self.cfg("B"); assert a["laps"]>=1
-            self.resA,self.resB=simulate(a),simulate(b)
-        except Exception as e: messagebox.showerror("Error",str(e)); return
-        d=self.resA["total"]-self.resB["total"]; f="A" if d<0 else "B"
-        self.k["ta"].set(fmt_sec(self.resA["total"])); self.k["tb"].set(fmt_sec(self.resB["total"])); self.k["df"].set(f"{abs(d):.3f} s ({f} mas rapido)")
-        self.k["ba"].set(fmt_sec(self.resA["best"])); self.k["bb"].set(fmt_sec(self.resB["best"]))
-        pa=f"A para en vueltas {', '.join(map(str,self.resA['pitLaps']))}" if self.resA["pitLaps"] else "A no para"
-        pb=f"B para en vueltas {', '.join(map(str,self.resB['pitLaps']))}" if self.resB["pitLaps"] else "B no para"
-        ref=self.loaded_ref or load_reference_profile(a["trackName"]) or {}
-        src=f"{ref.get('event',a['trackName'])} {ref.get('year',self.v['year'].get())} {ref.get('session',self.v['session'].get())}"
-        self.note.set(f"Estrategia {f} gana por {abs(d):.2f} s. {pa}. {pb}. Datos reales: {src}.")
-        self.draw_charts(); self.draw_table(); self.restart(a["trackName"])
-    def draw_charts(self):
-        self.fig.patch.set_facecolor(self.palette["card"])
-        for x in self.ax:
-            x.clear(); x.set_facecolor(self.palette["card"]); x.grid(color="#31415e",alpha=0.35,linewidth=0.8); x.tick_params(colors=self.palette["muted"]); [sp.set_color(self.palette["line"]) for sp in x.spines.values()]
-            x.title.set_color(self.palette["ink"]); x.xaxis.label.set_color(self.palette["muted"]); x.yaxis.label.set_color(self.palette["muted"])
-        xa,xb=range(1,len(self.resA["laps"])+1),range(1,len(self.resB["laps"])+1); ca,cb="#ff6961","#50d4ff"
-        self.ax[0].plot(list(xa),[l["time"] for l in self.resA["laps"]],c=ca,label="Plan A",linewidth=2.2); self.ax[0].plot(list(xb),[l["time"] for l in self.resB["laps"]],c=cb,label="Plan B",linewidth=2.2); self.ax[0].set_title("Tiempo Por Vuelta"); self.ax[0].legend(frameon=False,labelcolor=self.palette["muted"])
-        self.ax[1].plot(list(xa),[l["wear"] for l in self.resA["laps"]],c=ca,label="Plan A",linewidth=2.2); self.ax[1].plot(list(xb),[l["wear"] for l in self.resB["laps"]],c=cb,label="Plan B",linewidth=2.2); self.ax[1].set_title("Desgaste Neumatico"); self.ax[1].legend(frameon=False,labelcolor=self.palette["muted"])
-        self.ax[2].plot(list(xa),[l["fuel"] for l in self.resA["laps"]],c=ca,label="Plan A",linewidth=2.2); self.ax[2].plot(list(xb),[l["fuel"] for l in self.resB["laps"]],c=cb,label="Plan B",linewidth=2.2); self.ax[2].set_title("Combustible Remanente"); self.ax[2].legend(frameon=False,labelcolor=self.palette["muted"])
-        c=["straight","fast","slow"]; la=[self.resA["avgSegment"][k] for k in c]; lb=[self.resB["avgSegment"][k] for k in c]; xx=[0,1,2]; w=0.35
-        self.ax[3].bar([i-w/2 for i in xx],la,w,color=ca,label="Plan A"); self.ax[3].bar([i+w/2 for i in xx],lb,w,color=cb,label="Plan B"); self.ax[3].set_xticks(xx,["Recta","Curva rapida","Curva lenta"]); self.ax[3].set_title("Velocidad Promedio Por Segmento"); self.ax[3].legend(frameon=False,labelcolor=self.palette["muted"])
-        self.fig.tight_layout(pad=2); self.fc.draw_idle()
-    def draw_table(self):
-        [self.tv.delete(i) for i in self.tv.get_children()]; n=max(len(self.resA["laps"]),len(self.resB["laps"]))
-        for i in range(n):
-            a=self.resA["laps"][i] if i<len(self.resA["laps"]) else None; b=self.resB["laps"][i] if i<len(self.resB["laps"]) else None
-            self.tv.insert("", "end", values=(i+1,f"{a['time']:.3f} s" if a else "-",f"{a['wear']:.1f} %" if a else "-",f"{a['fuel']:.1f} kg" if a else "-",("Si" if a and a["pit"] else "No"),f"{b['time']:.3f} s" if b else "-",f"{b['wear']:.1f} %" if b else "-",f"{b['fuel']:.1f} kg" if b else "-",("Si" if b and b["pit"] else "No")))
-    def swap(self):
-        a=(self.v["tireA"].get(),self.v["fuelA"].get(),self.v["stopsA"].get(),self.v["degradeA"].get())
-        self.v["tireA"].set(self.v["tireB"].get()); self.v["fuelA"].set(self.v["fuelB"].get()); self.v["stopsA"].set(self.v["stopsB"].get()); self.v["degradeA"].set(self.v["degradeB"].get())
-        self.v["tireB"].set(a[0]); self.v["fuelB"].set(a[1]); self.v["stopsB"].set(a[2]); self.v["degradeB"].set(a[3]); self.run()
-    def restart(self,track):
-        self.track_name=track; self.vtime=0; self.last=None; self.vrun=True; self.play.config(text="Pausar")
-        self.geo=build_geo(track,int(self.cv.winfo_width() or 940),int(self.cv.winfo_height() or 300))
-        if self.after_id: self.r.after_cancel(self.after_id); self.after_id=None
-        self.frame()
-    def restart_btn(self):
-        if self.resA and self.resB: self.restart(self.track_name)
-    def toggle(self): self.vrun=not self.vrun; self.play.config(text="Pausar" if self.vrun else "Reanudar")
-    def frame(self):
-        if not (self.resA and self.resB and self.geo): return
-        tr=track_layout(self.track_name); tref=max(self.resA["total"],self.resB["total"]); now=int(self.r.tk.call("clock","milliseconds"))
-        if self.vrun:
-            if self.last is not None: self.vtime=min(tref,self.vtime+((now-self.last)/1000.0)*float(self.speed.get()))
-            self.last=now
-        else: self.last=now
-        a,b=state_at(self.resA,tr,self.vtime),state_at(self.resB,tr,self.vtime); pa,pb=point_at(self.geo,a["pRace"]),point_at(self.geo,b["pRace"]); lane=6
-        ax,ay=pa["x"]-math.sin(pa["ang"])*lane,pa["y"]+math.cos(pa["ang"])*lane; bx,by=pb["x"]+math.sin(pb["ang"])*lane,pb["y"]-math.cos(pb["ang"])*lane
-        self.cv.delete("all"); pts=self.geo["points"]; flat=[v for p in pts for v in (p["x"],p["y"])]
-        self.cv.create_line(*flat,fill="#1d2740",width=26,smooth=True,capstyle=tk.ROUND,joinstyle=tk.ROUND); self.cv.create_line(*flat,fill="#8898bb",width=16,smooth=True,capstyle=tk.ROUND,joinstyle=tk.ROUND)
-        st=point_at(self.geo,0.02); self.cv.create_line(st["x"]-8,st["y"]-8,st["x"]+8,st["y"]+8,fill="white",width=2); self.cv.create_line(st["x"]-8,st["y"]+8,st["x"]+8,st["y"]-8,fill="white",width=2)
-        for x,y,ang,c,l in[(ax,ay,pa["ang"],"#ff7b3f","A"),(bx,by,pb["ang"],"#33d9ff","B")]:
-            self.cv.create_line(x-math.cos(ang)*8,y-math.sin(ang)*8,x+math.cos(ang)*8,y+math.sin(ang)*8,width=6,fill=c); self.cv.create_oval(x-4,y-4,x+4,y+4,fill=c,outline=""); self.cv.create_text(x,y-12,text=l,fill="#e7f0ff",font=("Segoe UI",9,"bold"))
-        lead="A" if a["pRace"]>b["pRace"] else "B"; self.vmsg.set(f"t={self.vtime:.1f}s | A V{a['lap']} {a['speed']:.0f} km/h {'(BOX)' if a['pit'] else ''} | B V{b['lap']} {b['speed']:.0f} km/h {'(BOX)' if b['pit'] else ''} | Lider: {lead}")
-        if self.vtime>=tref and self.vrun: self.vrun=False; self.play.config(text="Reanudar")
-        self.after_id=self.r.after(16,self.frame)
+        except Exception as exc:
+            self.real_status.setText("Datos reales: error de carga")
+            raise RuntimeError("No se pudieron cargar datos reales con FastF1. Verifica internet y la sesion elegida.") from exc
 
-if __name__=="__main__":
-    root=tk.Tk()
-    try: ttk.Style().theme_use("clam")
-    except: pass
-    App(root); root.mainloop()
+    def run_simulation(self):
+        try:
+            self.fetch_real_data(False)
+            cfg_a = self.build_cfg("A")
+            cfg_b = self.build_cfg("B")
+            if cfg_a["laps"] < 1:
+                raise ValueError("Las vueltas deben ser mayores a cero.")
+            self.res_a = simulate(cfg_a)
+            self.res_b = simulate(cfg_b)
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", str(exc))
+            return
+
+        a_finished = self.res_a.get("finished", True)
+        b_finished = self.res_b.get("finished", True)
+        if a_finished and b_finished:
+            diff = self.res_a["total"] - self.res_b["total"]
+            winner = "A" if diff < 0 else "B"
+            diff_text = f"{abs(diff):.3f} s"
+        elif a_finished and not b_finished:
+            winner = "A"
+            diff_text = "B DNF"
+        elif b_finished and not a_finished:
+            winner = "B"
+            diff_text = "A DNF"
+        else:
+            winner = "-"
+            diff_text = "DOBLE DNF"
+        self.kpis["ta"].value.setText(fmt_sec(self.res_a["total"]) if a_finished else "DNF")
+        self.kpis["tb"].value.setText(fmt_sec(self.res_b["total"]) if b_finished else "DNF")
+        self.kpis["df"].value.setText(diff_text)
+        self.kpis["ba"].value.setText(fmt_sec(self.res_a["best"]) if self.res_a["laps"] else "-")
+        self.kpis["bb"].value.setText(fmt_sec(self.res_b["best"]) if self.res_b["laps"] else "-")
+        ref = self.loaded_ref or load_reference_profile(cfg_a["trackName"]) or {}
+        src = f"{ref.get('event', cfg_a['trackName'])} {ref.get('year', self.field_text('year'))} {ref.get('session', self.field_text('session'))}"
+        pa = f"A para en vueltas {', '.join(map(str, self.res_a['pitLaps']))}" if self.res_a["pitLaps"] else "A no para"
+        pb = f"B para en vueltas {', '.join(map(str, self.res_b['pitLaps']))}" if self.res_b["pitLaps"] else "B no para"
+        tire_plan_a = " -> ".join(self.res_a.get("tirePlan", []))
+        tire_plan_b = " -> ".join(self.res_b.get("tirePlan", []))
+        fuel_note_a = f"A DNF por combustible en vuelta {self.res_a['retiredLap']}." if not a_finished else ""
+        fuel_note_b = f"B DNF por combustible en vuelta {self.res_b['retiredLap']}." if not b_finished else ""
+        self.note.setText(
+            f"Estrategia {winner} gana. {pa}. {pb}. "
+            f"Plan A: {tire_plan_a}. Plan B: {tire_plan_b}. {fuel_note_a} {fuel_note_b} Datos reales: {src}."
+        )
+        self.track_name = cfg_a["trackName"]
+        self.update_charts()
+        self.update_table()
+        self.restart_view()
+
+    def update_charts(self):
+        self.figure.patch.set_facecolor(PALETTE["card"])
+        colors = (PALETTE["accent"], PALETTE["cyan"])
+        for ax in self.axes:
+            ax.clear()
+            ax.set_facecolor(PALETTE["card"])
+            ax.grid(color="#31415e", alpha=0.35, linewidth=0.8)
+            ax.tick_params(colors=PALETTE["muted"])
+            for spine in ax.spines.values():
+                spine.set_color(PALETTE["line"])
+        xa = list(range(1, len(self.res_a["laps"]) + 1))
+        xb = list(range(1, len(self.res_b["laps"]) + 1))
+        self.axes[0].plot(xa, [l["time"] for l in self.res_a["laps"]], color=colors[0], linewidth=2.2, label="Plan A")
+        self.axes[0].plot(xb, [l["time"] for l in self.res_b["laps"]], color=colors[1], linewidth=2.2, label="Plan B")
+        self.axes[0].set_title("Tiempo Por Vuelta", color=PALETTE["ink"])
+        self.axes[1].plot(xa, [l["wear"] for l in self.res_a["laps"]], color=colors[0], linewidth=2.2, label="Plan A")
+        self.axes[1].plot(xb, [l["wear"] for l in self.res_b["laps"]], color=colors[1], linewidth=2.2, label="Plan B")
+        self.axes[1].set_title("Desgaste Neumatico", color=PALETTE["ink"])
+        self.axes[2].plot(xa, [l["fuel"] for l in self.res_a["laps"]], color=colors[0], linewidth=2.2, label="Plan A")
+        self.axes[2].plot(xb, [l["fuel"] for l in self.res_b["laps"]], color=colors[1], linewidth=2.2, label="Plan B")
+        self.axes[2].set_title("Combustible Remanente", color=PALETTE["ink"])
+        cats = ["straight", "fast", "slow"]
+        la = [self.res_a["avgSegment"][k] for k in cats]
+        lb = [self.res_b["avgSegment"][k] for k in cats]
+        xs = [0, 1, 2]
+        self.axes[3].bar([i - 0.18 for i in xs], la, 0.36, color=colors[0], label="Plan A")
+        self.axes[3].bar([i + 0.18 for i in xs], lb, 0.36, color=colors[1], label="Plan B")
+        self.axes[3].set_xticks(xs, ["Recta", "Curva rapida", "Curva lenta"])
+        self.axes[3].set_title("Velocidad Promedio", color=PALETTE["ink"])
+        for ax in self.axes:
+            leg = ax.legend(frameon=False)
+            if leg:
+                for txt in leg.get_texts():
+                    txt.set_color(PALETTE["muted"])
+        self.figure.tight_layout(pad=2)
+        self.canvas.draw_idle()
+
+    def update_table(self):
+        n = max(len(self.res_a["laps"]), len(self.res_b["laps"]))
+        self.table.setRowCount(n)
+        for i in range(n):
+            a = self.res_a["laps"][i] if i < len(self.res_a["laps"]) else None
+            b = self.res_b["laps"][i] if i < len(self.res_b["laps"]) else None
+            values = [
+                str(i + 1),
+                f"{a['time']:.3f} s" if a else "-",
+                f"{a['wear']:.1f} %" if a else "-",
+                f"{a['fuel']:.1f} kg" if a else "-",
+                a["tire"] if a else "-",
+                "Si" if a and a["pit"] else "No",
+                f"{b['time']:.3f} s" if b else "-",
+                f"{b['wear']:.1f} %" if b else "-",
+                f"{b['fuel']:.1f} kg" if b else "-",
+                b["tire"] if b else "-",
+                "Si" if b and b["pit"] else "No",
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(i, col, item)
+        self.table.resizeColumnsToContents()
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.table.setColumnWidth(0, 72)
+
+    def swap_plans(self):
+        for ka, kb in (
+            ("tireA", "tireB"),
+            ("pitTire1A", "pitTire1B"),
+            ("pitTire2A", "pitTire2B"),
+            ("pitTire3A", "pitTire3B"),
+            ("fuelA", "fuelB"),
+            ("stopsA", "stopsB"),
+            ("degradeA", "degradeB"),
+        ):
+            va, vb = self.field_text(ka), self.field_text(kb)
+            self.set_field_text(ka, vb)
+            self.set_field_text(kb, va)
+        self.update_stint_fields("A")
+        self.update_stint_fields("B")
+        self.run_simulation()
+
+    def restart_view(self):
+        if not (self.res_a and self.res_b):
+            return
+        self.vtime = 0.0
+        self.vrun = True
+        self.last_ts = None
+        self.play_btn.setText("Pausar")
+        self.rebuild_track_scene(reset_time=False)
+        self.vtime = 0.0
+
+    def rebuild_track_scene(self, reset_time=False):
+        if not self.track_name:
+            return
+        width = self.track_widget.width()
+        height = self.track_widget.height()
+        if width <= 1 or height <= 1:
+            return
+        self.geo = build_geo(self.track_name, width, height)
+        team = self.field_text("car")
+        self.track_widget.set_scene(self.geo, team_a=team, team_b=team)
+        if reset_time:
+            self.vtime = 0.0
+
+    def toggle_play(self):
+        self.vrun = not self.vrun
+        self.play_btn.setText("Pausar" if self.vrun else "Reanudar")
+
+    def frame_update(self):
+        if not (self.res_a and self.res_b and self.geo):
+            return
+        track = track_layout(self.track_name)
+        tref = max(self.res_a["total"], self.res_b["total"])
+        now = time.time()
+        speed = float(self.speed_combo.currentText())
+        if self.vrun:
+            if self.last_ts is not None:
+                self.vtime = min(tref, self.vtime + (now - self.last_ts) * speed)
+            self.last_ts = now
+        else:
+            self.last_ts = now
+        a = state_at(self.res_a, track, self.vtime)
+        b = state_at(self.res_b, track, self.vtime)
+        team = self.field_text("car")
+        self.track_widget.set_scene(self.geo, a, b, team_a=team, team_b=team)
+        lead = "A" if a["pRace"] > b["pRace"] else "B"
+        self.vmsg.setText(
+            f"t={self.vtime:.1f}s | A V{a['lap']} {a['speed']:.0f} km/h {'(BOX)' if a['pit'] else ''} | "
+            f"B V{b['lap']} {b['speed']:.0f} km/h {'(BOX)' if b['pit'] else ''} | Lider: {lead}"
+        )
+        if self.vtime >= tref and self.vrun:
+            self.vrun = False
+            self.play_btn.setText("Reanudar")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_responsive_layout()
+        if self.width() < 1220:
+            self.main_splitter.setSizes([340, max(560, self.width() - 380)])
+        elif self.width() < 1380:
+            self.main_splitter.setSizes([360, max(640, self.width() - 400)])
+        else:
+            self.main_splitter.setSizes([360, max(820, self.width() - 420)])
+        if self.res_a and self.res_b:
+            QTimer.singleShot(0, lambda: self.rebuild_track_scene(reset_time=False))
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setStyleSheet(app_stylesheet())
+    window = MainWindow()
+    window.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

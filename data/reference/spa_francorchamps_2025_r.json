@@ -1,0 +1,124 @@
+{
+  "source": "FastF1",
+  "year": 2025,
+  "event": "Spanish Grand Prix",
+  "requested_event": "Spa",
+  "track_name": "Spa-Francorchamps",
+  "session": "R",
+  "track": {
+    "turn_count": 14,
+    "lap_length_m": 4631.271718972375,
+    "fuel_per_lap_kg": null,
+    "pit_loss_s": null,
+    "rotation_deg": 303.0
+  },
+  "weather": {
+    "air_temp_c": 28.9,
+    "track_temp_c": 47.5,
+    "humidity_pct": 59.0,
+    "wind_speed_ms": 2.3,
+    "rainfall": false
+  },
+  "teams": {
+    "McLaren": {
+      "driver": "PIA",
+      "lap_time_s": 75.743,
+      "avg_speed_kph": 221.0886524822695,
+      "top_speed_kph": 309.0,
+      "speed_p25_kph": 168.5,
+      "speed_p75_kph": 270.75,
+      "full_throttle_ratio": 0.5177304964539007,
+      "brake_ratio": 0.16312056737588654
+    },
+    "Red Bull Racing": {
+      "driver": "VER",
+      "lap_time_s": 77.019,
+      "avg_speed_kph": 217.7900355871886,
+      "top_speed_kph": 313.0,
+      "speed_p25_kph": 164.0,
+      "speed_p75_kph": 269.0,
+      "full_throttle_ratio": 0.5587188612099644,
+      "brake_ratio": 0.16370106761565836
+    },
+    "Mercedes": {
+      "driver": "RUS",
+      "lap_time_s": 77.244,
+      "avg_speed_kph": 216.21785714285716,
+      "top_speed_kph": 313.0,
+      "speed_p25_kph": 160.75,
+      "speed_p75_kph": 268.25,
+      "full_throttle_ratio": 0.5571428571428572,
+      "brake_ratio": 0.16071428571428573
+    },
+    "Ferrari": {
+      "driver": "LEC",
+      "lap_time_s": 77.259,
+      "avg_speed_kph": 216.49285714285713,
+      "top_speed_kph": 311.0,
+      "speed_p25_kph": 159.5,
+      "speed_p75_kph": 267.25,
+      "full_throttle_ratio": 0.5071428571428571,
+      "brake_ratio": 0.19642857142857142
+    },
+    "Kick Sauber": {
+      "driver": "HUL",
+      "lap_time_s": 77.575,
+      "avg_speed_kph": 212.71080139372822,
+      "top_speed_kph": 335.0,
+      "speed_p25_kph": 161.0,
+      "speed_p75_kph": 259.0,
+      "full_throttle_ratio": 0.5156794425087108,
+      "brake_ratio": 0.18466898954703834
+    },
+    "Racing Bulls": {
+      "driver": "HAD",
+      "lap_time_s": 77.77,
+      "avg_speed_kph": 210.89236111111111,
+      "top_speed_kph": 313.0,
+      "speed_p25_kph": 155.0,
+      "speed_p75_kph": 260.25,
+      "full_throttle_ratio": 0.5104166666666666,
+      "brake_ratio": 0.16666666666666666
+    },
+    "Alpine": {
+      "driver": "GAS",
+      "lap_time_s": 77.896,
+      "avg_speed_kph": 210.01038062283737,
+      "top_speed_kph": 335.0,
+      "speed_p25_kph": 148.0,
+      "speed_p75_kph": 259.0,
+      "full_throttle_ratio": 0.4809688581314879,
+      "brake_ratio": 0.16262975778546712
+    },
+    "Aston Martin": {
+      "driver": "ALO",
+      "lap_time_s": 78.128,
+      "avg_speed_kph": 211.6360544217687,
+      "top_speed_kph": 307.0,
+      "speed_p25_kph": 156.5,
+      "speed_p75_kph": 261.0,
+      "full_throttle_ratio": 0.5340136054421769,
+      "brake_ratio": 0.17687074829931973
+    },
+    "Haas F1 Team": {
+      "driver": "OCO",
+      "lap_time_s": 78.624,
+      "avg_speed_kph": 211.84192439862542,
+      "top_speed_kph": 325.0,
+      "speed_p25_kph": 155.0,
+      "speed_p75_kph": 256.5,
+      "full_throttle_ratio": 0.5189003436426117,
+      "brake_ratio": 0.20962199312714777
+    },
+    "Williams": {
+      "driver": "SAI",
+      "lap_time_s": 79.317,
+      "avg_speed_kph": 208.27272727272728,
+      "top_speed_kph": 343.0,
+      "speed_p25_kph": 148.0,
+      "speed_p75_kph": 256.75,
+      "full_throttle_ratio": 0.458041958041958,
+      "brake_ratio": 0.2062937062937063
+    }
+  }
+}
