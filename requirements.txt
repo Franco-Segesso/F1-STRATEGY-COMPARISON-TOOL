@@ -1,5 +1,2 @@
 PySide6
 matplotlib
-fastf1
-pandas
-numpy

@@ -1,0 +1,127 @@
+{
+  "source": "FastF1",
+  "year": 2025,
+  "event": "British Grand Prix",
+  "requested_event": "Silverstone",
+  "track_name": "Silverstone",
+  "session": "FP3",
+  "track": {
+    "turn_count": 18,
+    "lap_length_m": 5832.186260922547,
+    "fuel_per_lap_kg": null,
+    "pit_loss_s": null,
+    "rotation_deg": 92.0
+  },
+  "weather": {
+    "air_temp_c": 19.8,
+    "track_temp_c": 24.8,
+    "humidity_pct": 71.0,
+    "wind_speed_ms": 2.2,
+    "rainfall": false
+  },
+  "reference_lap_time_s": 85.498,
+  "reference_driver": "LEC",
+  "reference_mode": "fastest_lap",
+  "teams": {
+    "Alpine": {
+      "driver": "COL",
+      "lap_time_s": 87.597,
+      "avg_speed_kph": 238.77848101265823,
+      "top_speed_kph": 322.0,
+      "speed_p25_kph": 175.75,
+      "speed_p75_kph": 299.0,
+      "full_throttle_ratio": 0.6265822784810127,
+      "brake_ratio": 0.12341772151898735
+    },
+    "Aston Martin": {
+      "driver": "ALO",
+      "lap_time_s": 86.894,
+      "avg_speed_kph": 241.2066869300912,
+      "top_speed_kph": 322.0,
+      "speed_p25_kph": 188.0,
+      "speed_p75_kph": 299.0,
+      "full_throttle_ratio": 0.6899696048632219,
+      "brake_ratio": 0.11550151975683891
+    },
+    "Ferrari": {
+      "driver": "LEC",
+      "lap_time_s": 85.498,
+      "avg_speed_kph": 244.384375,
+      "top_speed_kph": 321.0,
+      "speed_p25_kph": 191.0,
+      "speed_p75_kph": 302.0,
+      "full_throttle_ratio": 0.69375,
+      "brake_ratio": 0.11875
+    },
+    "Haas F1 Team": {
+      "driver": "BEA",
+      "lap_time_s": 86.112,
+      "avg_speed_kph": 246.21835443037975,
+      "top_speed_kph": 319.0,
+      "speed_p25_kph": 198.25,
+      "speed_p75_kph": 301.0,
+      "full_throttle_ratio": 0.6772151898734177,
+      "brake_ratio": 0.12341772151898735
+    },
+    "Kick Sauber": {
+      "driver": "HUL",
+      "lap_time_s": 86.499,
+      "avg_speed_kph": 244.378125,
+      "top_speed_kph": 320.0,
+      "speed_p25_kph": 199.75,
+      "speed_p75_kph": 298.0,
+      "full_throttle_ratio": 0.690625,
+      "brake_ratio": 0.121875
+    },
+    "McLaren": {
+      "driver": "PIA",
+      "lap_time_s": 85.566,
+      "avg_speed_kph": 247.42638036809817,
+      "top_speed_kph": 320.0,
+      "speed_p25_kph": 201.0,
+      "speed_p75_kph": 300.75,
+      "full_throttle_ratio": 0.6257668711656442,
+      "brake_ratio": 0.11349693251533742
+    },
+    "Mercedes": {
+      "driver": "RUS",
+      "lap_time_s": 86.125,
+      "avg_speed_kph": 244.64465408805032,
+      "top_speed_kph": 320.0,
+      "speed_p25_kph": 194.0,
+      "speed_p75_kph": 301.0,
+      "full_throttle_ratio": 0.6729559748427673,
+      "brake_ratio": 0.16037735849056603
+    },
+    "Racing Bulls": {
+      "driver": "HAD",
+      "lap_time_s": 86.129,
+      "avg_speed_kph": 244.24223602484471,
+      "top_speed_kph": 321.0,
+      "speed_p25_kph": 191.5,
+      "speed_p75_kph": 300.0,
+      "full_throttle_ratio": 0.6832298136645962,
+      "brake_ratio": 0.11801242236024845
+    },
+    "Red Bull Racing": {
+      "driver": "VER",
+      "lap_time_s": 85.585,
+      "avg_speed_kph": 243.27564102564102,
+      "top_speed_kph": 325.0,
+      "speed_p25_kph": 186.75,
+      "speed_p75_kph": 304.0,
+      "full_throttle_ratio": 0.6826923076923077,
+      "brake_ratio": 0.12179487179487179
+    },
+    "Williams": {
+      "driver": "ALB",
+      "lap_time_s": 86.119,
+      "avg_speed_kph": 244.527950310559,
+      "top_speed_kph": 320.0,
+      "speed_p25_kph": 190.0,
+      "speed_p75_kph": 302.0,
+      "full_throttle_ratio": 0.6459627329192547,
+      "brake_ratio": 0.13043478260869565
+    }
+  }
+}

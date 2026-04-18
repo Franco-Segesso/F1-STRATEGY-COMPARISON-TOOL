@@ -50,6 +50,18 @@ def reference_adjustments(track_name, team_name):
     )
 
 
+def session_adjustments(session_name):
+    """Session-specific car usage model layered on top of the base setup."""
+    session_key = str(session_name or "R").upper()
+    profiles = {
+        "Q": dict(powerFactor=1.010, ersFactor=1.050, dragFactor=0.994, gripFactor=1.015),
+        "SQ": dict(powerFactor=1.008, ersFactor=1.040, dragFactor=0.996, gripFactor=1.012),
+        "S": dict(powerFactor=1.004, ersFactor=1.020, dragFactor=0.998, gripFactor=1.006),
+        "R": dict(powerFactor=1.000, ersFactor=1.000, dragFactor=1.000, gripFactor=1.000),
+    }
+    return profiles.get(session_key, profiles["R"])
+
+
 def normalize_tire_plan(cfg):
     stops = max(0, int(cfg.get("stops", 0)))
     plan = [cfg["tireName"]]
@@ -59,30 +71,38 @@ def normalize_tire_plan(cfg):
     return plan
 
 
-def integrate(params, seg, state, track):
-    dist, dt = seg["distanceKm"] * 1000, 0.05
+def compute_accel(params, seg, state, track, v, dt=0.05):
+    """Compute dv/dt from the current car state for both Euler and RK4."""
     base_radius = {"straight": 12000, "fast": 170, "slow": 72}[seg["type"]]
-    x, v, t = 0, max(22, state["vEntry"]), 0
     top_speed = params["topSpeedMS"] * (0.985 if seg["type"] == "straight" else 0.88 if seg["type"] == "fast" else 0.72)
+    v = max(14, min(params["topSpeedMS"], v))
+    m = params["mass"] + state["fuel"]
+    tyre_state = max(0.72, 1 - 0.0031 * state["wear"])
+    grip = max(0.78, params["gripEff"] * tyre_state)
+    aero_downforce = 0.5 * RHO * params["downforce"] * v * v
+    normal = m * G + aero_downforce
+    traction = params["traction"] * grip * normal
+    straight_drag_scale = 0.92 if seg["type"] == "straight" and track["drsZones"] > 0 else 1.0
+    drag = 0.5 * RHO * params["dragEff"] * straight_drag_scale * v * v
+    power_force = min((params["powerW"] + params["ersW"]) / max(v, 14), traction)
+    rolling = 0.014 * m * G
+    accel = (power_force - drag - rolling) / m
+    if seg["type"] != "straight":
+        vc = min(top_speed, math.sqrt(max(25, grip * G * base_radius)) * params["cornerFactor"])
+        if v > vc:
+            brake = (params["brakeMS2"] + 0.0045 * aero_downforce / m) * (1.05 if seg["type"] == "slow" else 0.92)
+            accel = -max(0.5, brake * (v - vc) / max(v, 1))
+    else:
+        accel = min(accel, (params["topSpeedMS"] - v) / max(dt, 1e-6))
+    return accel
+
+
+def integrate_euler(params, seg, state, track):
+    """Explicit Euler integrator over dx/dt=v and dv/dt=a(...) with fixed dt."""
+    dist, dt = seg["distanceKm"] * 1000, 0.05
+    x, v, t = 0, max(22, state["vEntry"]), 0
     while x < dist:
-        m = params["mass"] + state["fuel"]
-        tyre_state = max(0.72, 1 - 0.0031 * state["wear"])
-        grip = max(0.78, params["gripEff"] * tyre_state)
-        aero_downforce = 0.5 * RHO * params["downforce"] * v * v
-        normal = m * G + aero_downforce
-        traction = params["traction"] * grip * normal
-        straight_drag_scale = 0.92 if seg["type"] == "straight" and track["drsZones"] > 0 else 1.0
-        drag = 0.5 * RHO * params["dragEff"] * straight_drag_scale * v * v
-        power_force = min((params["powerW"] + params["ersW"]) / max(v, 14), traction)
-        rolling = 0.014 * m * G
-        accel = (power_force - drag - rolling) / m
-        if seg["type"] != "straight":
-            vc = min(top_speed, math.sqrt(max(25, grip * G * base_radius)) * params["cornerFactor"])
-            if v > vc:
-                brake = (params["brakeMS2"] + 0.0045 * aero_downforce / m) * (1.05 if seg["type"] == "slow" else 0.92)
-                accel = -max(0.5, brake * (v - vc) / max(v, 1))
-        else:
-            accel = min(accel, (params["topSpeedMS"] - v) / max(dt, 1e-6))
+        accel = compute_accel(params, seg, state, track, v, dt)
         v = max(14, min(params["topSpeedMS"], v + accel * dt))
         x += v * dt
         t += dt
@@ -91,9 +111,40 @@ def integrate(params, seg, state, track):
     return dict(t=t, vOut=v)
 
 
+def integrate_rk4(params, seg, state, track):
+    """Classical RK4 integrator over the first-order system dx/dt=v, dv/dt=a(...)."""
+    dist, dt = seg["distanceKm"] * 1000, 0.05
+    x, v, t = 0, max(22, state["vEntry"]), 0
+    while x < dist:
+        def rhs(local_v):
+            bounded_v = max(14, min(params["topSpeedMS"], local_v))
+            return bounded_v, compute_accel(params, seg, state, track, bounded_v, dt)
+
+        k1x, k1v = rhs(v)
+        k2x, k2v = rhs(v + 0.5 * dt * k1v)
+        k3x, k3v = rhs(v + 0.5 * dt * k2v)
+        k4x, k4v = rhs(v + dt * k3v)
+
+        x += (dt / 6.0) * (k1x + 2 * k2x + 2 * k3x + k4x)
+        v += (dt / 6.0) * (k1v + 2 * k2v + 2 * k3v + k4v)
+        v = max(14, min(params["topSpeedMS"], v))
+        t += dt
+        if t > 220:
+            break
+    return dict(t=t, vOut=v)
+
+
+def get_integrator(method_name):
+    method = (method_name or "Euler").strip().lower()
+    if method == "rk4":
+        return integrate_rk4
+    return integrate_euler
+
+
 def simulate(cfg):
     w, track = WEATHER[cfg["weather"]], track_layout(cfg["trackName"])
     ref = reference_adjustments(cfg["trackName"], cfg["teamName"])
+    sess = session_adjustments(cfg.get("sessionName", "R"))
     top_speed_kph = ref.get("topSpeedKph") or cfg["topSpeedKph"]
     fuel_base = (ref.get("fuelPerLapKg") or track["fuelPerLapKg"]) * w["fuelFactor"]
     pit_loss = ref.get("pitLoss") or track["pitLoss"]
@@ -102,22 +153,24 @@ def simulate(cfg):
     tire_name = tire_plan[current_tire_index]
     tire = TIRES[tire_name]
     p = dict(
-        powerW=cfg["power"] * 1000,
-        ersW=cfg["ers"] * 120000,
+        powerW=cfg["power"] * 1000 * sess["powerFactor"],
+        ersW=cfg["ers"] * 120000 * sess["ersFactor"],
         mass=cfg["mass"],
-        dragEff=cfg["drag"] * w["dragFactor"],
+        dragEff=cfg["drag"] * w["dragFactor"] * sess["dragFactor"],
         downforce=cfg["downforce"] * 1.55,
         traction=cfg["traction"],
         brakeMS2=cfg["brake"] * 11.8 * track["brakeStress"],
-        gripEff=tire["grip"] * w["gripFactor"] * tire["warmup"],
+        gripEff=tire["grip"] * w["gripFactor"] * tire["warmup"] * sess["gripFactor"],
         cornerFactor=1.0 + 0.06 * (cfg["downforce"] - 1.0),
         topSpeedMS=(top_speed_kph * w["topSpeedFactor"]) / 3.6,
     )
+    integrator = get_integrator(cfg.get("integrationMethod", "Euler"))
     pits = pit_sched(cfg["laps"], cfg["stops"])
     st = dict(fuel=cfg["fuel"], wear=0, vEntry=62)
     laps = []
     finished = True
     retired_lap = None
+    last_v_out = st["vEntry"]
     for lap in range(1, cfg["laps"] + 1):
         if st["fuel"] <= 0.05:
             finished = False
@@ -133,9 +186,10 @@ def simulate(cfg):
         lap_t = 0
         vc = st["vEntry"]
         for seg in track["segments"]:
-            r = integrate(p, seg, dict(fuel=st["fuel"], wear=st["wear"], vEntry=vc), track)
+            r = integrator(p, seg, dict(fuel=st["fuel"], wear=st["wear"], vEntry=vc), track)
             lap_t += r["t"]
             vc = r["vOut"] * (0.70 if seg["type"] == "slow" else 0.84 if seg["type"] == "fast" else 0.90)
+            last_v_out = r["vOut"]
             ld["segStats"][seg["type"]]["d"] += seg["distanceKm"] * 1000
             ld["segStats"][seg["type"]]["t"] += r["t"]
         for k, ss in ld["segStats"].items():
@@ -168,6 +222,9 @@ def simulate(cfg):
         tirePlan=tire_plan,
         finished=finished,
         retiredLap=retired_lap,
+        integrationMethod=cfg.get("integrationMethod", "Euler"),
+        sessionName=cfg.get("sessionName", "R"),
+        finalSegmentExitSpeed=last_v_out,
     )
 
 
@@ -176,7 +233,13 @@ def build_geo(name, w, h):
     h = max(180, int(h))
     margin = max(28, min(w, h) * 0.10)
     if REAL_TRACKS.get(name):
-        pts = REAL_TRACKS[name]["pointsMeters"]
+        pts = [
+            p for p in REAL_TRACKS[name]["pointsMeters"]
+            if math.isfinite(p["x"]) and math.isfinite(p["y"])
+        ]
+        if len(pts) < 8:
+            REAL_TRACKS[name] = None
+            return build_geo(name, w, h)
         mnx, mxx = min(p["x"] for p in pts), max(p["x"] for p in pts)
         mny, mxy = min(p["y"] for p in pts), max(p["y"] for p in pts)
         s = min((w - 2 * margin) / max(1e-6, mxx - mnx), (h - 2 * margin) / max(1e-6, mxy - mny))
@@ -208,6 +271,8 @@ def build_geo(name, w, h):
     for i in range(1, len(m)):
         tot += math.hypot(m[i]["x"] - m[i - 1]["x"], m[i]["y"] - m[i - 1]["y"])
         cum.append(tot)
+    if not math.isfinite(tot) or tot <= 0:
+        return None
     return dict(points=m, cum=cum, total=tot)
 
 

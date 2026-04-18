@@ -203,7 +203,10 @@ def load_track_points(track_name: str) -> Optional[List[dict]]:
             if not row or row[0].startswith("#"):
                 continue
             try:
-                points.append(dict(x=float(row[0]), y=float(row[1])))
+                x = float(row[0])
+                y = float(row[1])
+                if math.isfinite(x) and math.isfinite(y):
+                    points.append(dict(x=x, y=y))
             except (TypeError, ValueError):
                 continue
     return points if len(points) > 50 else None
@@ -220,6 +223,13 @@ def _angle_wrap(angle: float) -> float:
 def build_track_from_points(track_name: str) -> Optional[dict]:
     points = load_track_points(track_name)
     if not points:
+        return None
+    sanitized = [points[0]]
+    for point in points[1:]:
+        if math.hypot(point["x"] - sanitized[-1]["x"], point["y"] - sanitized[-1]["y"]) >= 1e-4:
+            sanitized.append(point)
+    points = sanitized
+    if len(points) < 8:
         return None
     loop = points + [dict(points[0])]
     distances = []
@@ -275,11 +285,12 @@ def build_track_from_points(track_name: str) -> Optional[dict]:
     )
 
 
-def load_reference_profile(track_name: str) -> Optional[dict]:
+def iter_reference_profiles(track_name: str) -> List[dict]:
     ensure_data_dirs()
     slugs = [slugify(track_name)] + [slugify(alias) for alias in TRACK_EVENT_ALIASES.get(track_name, [])]
+    refs: List[dict] = []
     if not os.path.isdir(REFERENCE_DIR):
-        return None
+        return refs
     for filename in sorted(os.listdir(REFERENCE_DIR), reverse=True):
         if not filename.endswith(".json"):
             continue
@@ -288,7 +299,59 @@ def load_reference_profile(track_name: str) -> Optional[dict]:
         path = os.path.join(REFERENCE_DIR, filename)
         try:
             with open(path, encoding="utf-8") as f:
-                return json.load(f)
+                refs.append(json.load(f))
         except (OSError, json.JSONDecodeError):
-            return None
-    return None
+            continue
+    return refs
+
+
+def load_reference_profile(track_name: str, year: Optional[int] = None, session: Optional[str] = None) -> Optional[dict]:
+    refs = iter_reference_profiles(track_name)
+    if not refs:
+        return None
+    if year is not None and session is not None:
+        session_key = str(session).upper()
+        for ref in refs:
+            if int(ref.get("year", 0)) == int(year) and str(ref.get("session", "")).upper() == session_key:
+                return ref
+    return refs[0]
+
+
+def available_reference_sessions(track_name: str) -> List[str]:
+    sessions = []
+    for ref in iter_reference_profiles(track_name):
+        year = ref.get("year", "?")
+        session = ref.get("session", "?")
+        label = f"{year} {session}"
+        if label not in sessions:
+            sessions.append(label)
+    return sessions
+
+
+def available_reference_years(track_name: str) -> List[str]:
+    years = []
+    for ref in iter_reference_profiles(track_name):
+        year = str(ref.get("year", "?"))
+        if year not in years:
+            years.append(year)
+    return years
+
+
+def available_sessions_for_year(track_name: str, year: Optional[int] = None) -> List[str]:
+    sessions = []
+    for ref in iter_reference_profiles(track_name):
+        ref_year = str(ref.get("year", "?"))
+        if year is not None and ref_year != str(year):
+            continue
+        session = str(ref.get("session", "?")).upper()
+        if session not in sessions:
+            sessions.append(session)
+    return sessions
+
+
+def available_reference_tracks() -> List[str]:
+    tracks = []
+    for track_name in TRACKS:
+        if iter_reference_profiles(track_name):
+            tracks.append(track_name)
+    return tracks

@@ -16,17 +16,71 @@ def export_track_csv(path, telemetry):
                 writer.writerow([float(x) / 10.0, float(y) / 10.0])
 
 
-def build_team_snapshot(session, fastest_laps):
-    teams = {}
-    for _, lap in fastest_laps.iterrows():
-        team = str(lap["Team"])
-        if team in teams:
+def is_green_lap(row):
+    status = str(row.get("TrackStatus", "") or "").strip()
+    return not status or all(ch == "1" for ch in status if ch.isdigit())
+
+
+def clean_reference_laps(laps, session_name):
+    clean = laps.dropna(subset=["LapTime"]).copy()
+    if "PitOutTime" in clean:
+        clean = clean[clean["PitOutTime"].isna()]
+    if "PitInTime" in clean:
+        clean = clean[clean["PitInTime"].isna()]
+    if "TrackStatus" in clean:
+        clean = clean[clean.apply(is_green_lap, axis=1)]
+    if clean.empty:
+        clean = laps.dropna(subset=["LapTime"]).copy()
+    session_key = str(session_name).upper()
+    if session_key in ("R", "S"):
+        return clean.sort_values("LapTime")
+    return clean.sort_values("LapTime")
+
+
+def pick_reference_lap(clean_laps, session_name):
+    if clean_laps.empty:
+        raise SystemExit("No se encontraron vueltas limpias para construir la referencia.")
+    session_key = str(session_name).upper()
+    if session_key in ("R", "S"):
+        median_time = clean_laps["LapTime"].median()
+        ranked = clean_laps.assign(
+            _delta=clean_laps["LapTime"].apply(lambda x: abs((x - median_time).total_seconds()))
+        ).sort_values("_delta")
+        return ranked.iloc[0]
+    return clean_laps.iloc[0]
+
+
+def pick_telemetry_lap(candidate_laps):
+    for _, lap in candidate_laps.iterrows():
+        try:
+            telemetry = lap.get_telemetry().add_distance()
+        except Exception:
             continue
+        if {"X", "Y"}.issubset(set(telemetry.columns)) and telemetry[["X", "Y"]].dropna().shape[0] > 50:
+            return lap, telemetry
+    raise SystemExit("No se pudo obtener una telemetria valida del circuito para esta sesion.")
+
+
+def build_team_snapshot(session, candidate_laps, session_name):
+    teams = {}
+    session_key = str(session_name).upper()
+    grouped = candidate_laps.groupby("Team", dropna=True)
+    for team, team_laps in grouped:
+        team_laps = team_laps.dropna(subset=["LapTime"]).sort_values("LapTime").copy()
+        if team_laps.empty:
+            continue
+        if session_key in ("R", "S"):
+            median_time = team_laps["LapTime"].median()
+            lap = team_laps.assign(
+                _delta=team_laps["LapTime"].apply(lambda x: abs((x - median_time).total_seconds()))
+            ).sort_values("_delta").iloc[0]
+        else:
+            lap = team_laps.iloc[0]
         telemetry = lap.get_car_data().add_distance()
         speed = telemetry["Speed"].dropna()
         throttle = telemetry["Throttle"].dropna() if "Throttle" in telemetry else []
         brake = telemetry["Brake"].dropna() if "Brake" in telemetry else []
-        teams[team] = {
+        teams[str(team)] = {
             "driver": str(lap["Driver"]),
             "lap_time_s": float(lap["LapTime"].total_seconds()),
             "avg_speed_kph": float(speed.mean()) if len(speed) else None,
@@ -54,14 +108,14 @@ def build_reference(year, event, session_name, cache_dir, output_name=None):
     session.load(laps=True, telemetry=True, weather=True, messages=False)
 
     laps = session.laps.pick_accurate()
-    fastest = laps.sort_values("LapTime").dropna(subset=["LapTime"])
-    if fastest.empty:
+    candidate_laps = clean_reference_laps(laps, session_name)
+    if candidate_laps.empty:
         raise SystemExit("No se encontraron vueltas validas para construir la referencia.")
 
-    fastest_lap = fastest.iloc[0]
-    telemetry = fastest_lap.get_telemetry().add_distance()
+    reference_lap = pick_reference_lap(candidate_laps, session_name)
+    _, telemetry = pick_telemetry_lap(candidate_laps)
     circuit_info = session.get_circuit_info()
-    weather = fastest_lap.get_weather_data()
+    weather = reference_lap.get_weather_data()
     track_label = output_name or event
     track_slug = slugify(track_label)
 
@@ -86,11 +140,14 @@ def build_reference(year, event, session_name, cache_dir, output_name=None):
             "wind_speed_ms": float(weather["WindSpeed"]) if "WindSpeed" in weather else None,
             "rainfall": bool(weather["Rainfall"]) if "Rainfall" in weather else None,
         },
-        "teams": build_team_snapshot(session, fastest),
+        "reference_lap_time_s": float(reference_lap["LapTime"].total_seconds()),
+        "reference_driver": str(reference_lap["Driver"]),
+        "reference_mode": "median_clean_lap" if str(session_name).upper() in ("R", "S") else "fastest_lap",
+        "teams": build_team_snapshot(session, candidate_laps, session_name),
     }
 
-    if "FuelInTank" in fastest.columns:
-        fuel_series = fastest["FuelInTank"].dropna()
+    if "FuelInTank" in candidate_laps.columns:
+        fuel_series = candidate_laps["FuelInTank"].dropna()
         if len(fuel_series) >= 2:
             deltas = [fuel_series.iloc[i] - fuel_series.iloc[i + 1] for i in range(len(fuel_series) - 1)]
             deltas = [d for d in deltas if d > 0]
@@ -125,13 +182,15 @@ def main():
     parser.add_argument("--event", required=True, help="Nombre del GP segun FastF1, por ejemplo Monza o Japan")
     parser.add_argument("--session", default="Q", help="Sesion: Q, R, FP1, FP2, FP3, SQ o S")
     parser.add_argument("--cache-dir", default=os.path.join(os.path.dirname(__file__), ".fastf1_cache"))
+    parser.add_argument("--output-name", default=None, help="Nombre canonico del circuito para guardar CSV/JSON")
     args = parser.parse_args()
 
-    output_name = None
-    for track_name, aliases in TRACK_EVENT_ALIASES.items():
-        if slugify(args.event) in {slugify(track_name), *(slugify(alias) for alias in aliases)}:
-            output_name = track_name
-            break
+    output_name = args.output_name
+    if not output_name:
+        for track_name, aliases in TRACK_EVENT_ALIASES.items():
+            if slugify(args.event) in {slugify(track_name), *(slugify(alias) for alias in aliases)}:
+                output_name = track_name
+                break
     csv_path, json_path = build_reference(args.year, args.event, args.session, args.cache_dir, output_name=output_name)
     print("Track CSV:", csv_path)
     print("Reference JSON:", json_path)
