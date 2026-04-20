@@ -1,13 +1,12 @@
 import math
 import os
-import subprocess
 import sys
 import time
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QBrush
+from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QBoxLayout,
@@ -70,6 +69,32 @@ TEAM_LIVERIES = {
     "Racing Bulls": dict(body="#e9f1ff", accent="#3c78ff", dark="#8e99aa"),
     "Audi": dict(body="#bf2026", accent="#e4e4e4", dark="#5e0f14"),
     "Cadillac": dict(body="#1e5cff", accent="#ffffff", dark="#12316f"),
+}
+
+PILOT_PROFILES = {
+    "Custom": None,
+    "Max Verstappen": dict(team="Red Bull Racing", skill=0.98, aggression=0.84, consistency=0.95, tire="C4 Soft"),
+    "Isack Hadjar": dict(team="Red Bull Racing", skill=0.88, aggression=0.78, consistency=0.84, tire="C4 Soft"),
+    "Lando Norris": dict(team="McLaren", skill=0.95, aggression=0.80, consistency=0.92, tire="C4 Soft"),
+    "Oscar Piastri": dict(team="McLaren", skill=0.94, aggression=0.79, consistency=0.91, tire="C4 Soft"),
+    "Charles Leclerc": dict(team="Ferrari", skill=0.96, aggression=0.82, consistency=0.91, tire="C5 Soft"),
+    "Lewis Hamilton": dict(team="Ferrari", skill=0.95, aggression=0.76, consistency=0.93, tire="C4 Soft"),
+    "George Russell": dict(team="Mercedes", skill=0.93, aggression=0.77, consistency=0.90, tire="C4 Soft"),
+    "Kimi Antonelli": dict(team="Mercedes", skill=0.88, aggression=0.75, consistency=0.84, tire="C4 Soft"),
+    "Fernando Alonso": dict(team="Aston Martin", skill=0.94, aggression=0.74, consistency=0.92, tire="C4 Soft"),
+    "Lance Stroll": dict(team="Aston Martin", skill=0.84, aggression=0.70, consistency=0.80, tire="C3 Medium"),
+    "Alex Albon": dict(team="Williams", skill=0.90, aggression=0.76, consistency=0.87, tire="C4 Soft"),
+    "Carlos Sainz": dict(team="Williams", skill=0.92, aggression=0.74, consistency=0.90, tire="C4 Soft"),
+    "Pierre Gasly": dict(team="Alpine", skill=0.89, aggression=0.74, consistency=0.86, tire="C4 Soft"),
+    "Franco Colapinto": dict(team="Alpine", skill=0.86, aggression=0.77, consistency=0.80, tire="C4 Soft"),
+    "Esteban Ocon": dict(team="Haas F1 Team", skill=0.88, aggression=0.72, consistency=0.86, tire="C3 Medium"),
+    "Oliver Bearman": dict(team="Haas F1 Team", skill=0.83, aggression=0.77, consistency=0.79, tire="C4 Soft"),
+    "Liam Lawson": dict(team="Racing Bulls", skill=0.84, aggression=0.78, consistency=0.80, tire="C4 Soft"),
+    "Arvid Lindblad": dict(team="Racing Bulls", skill=0.81, aggression=0.81, consistency=0.76, tire="C4 Soft"),
+    "Nico Hulkenberg": dict(team="Audi", skill=0.88, aggression=0.68, consistency=0.87, tire="C3 Medium"),
+    "Gabriel Bortoleto": dict(team="Audi", skill=0.82, aggression=0.74, consistency=0.78, tire="C4 Soft"),
+    "Valtteri Bottas": dict(team="Cadillac", skill=0.89, aggression=0.66, consistency=0.88, tire="C3 Medium"),
+    "Sergio Perez": dict(team="Cadillac", skill=0.90, aggression=0.71, consistency=0.87, tire="C3 Medium"),
 }
 
 
@@ -411,7 +436,7 @@ class TrackWidget(QWidget):
         painter.fillRect(self.rect(), grad)
         if not self.geo:
             painter.setPen(QColor(PALETTE["muted"]))
-            painter.drawText(self.rect(), Qt.AlignCenter, "Carga una sesion real y ejecuta la simulacion")
+            painter.drawText(self.rect(), Qt.AlignCenter, "Carga una referencia local y ejecuta la vuelta rapida")
             return
         pts = self.geo["points"]
         if len(pts) < 2 or any((not math.isfinite(p["x"]) or not math.isfinite(p["y"])) for p in pts[: min(len(pts), 200)]):
@@ -464,7 +489,6 @@ class MainWindow(QMainWindow):
         self.last_ts = None
         self.fields = {}
         self._build_ui()
-        self.apply_team()
         self.apply_track_defaults()
 
         self.timer = QTimer(self)
@@ -478,10 +502,10 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(12)
 
-        title = QLabel("F1 Strategy Lab")
+        title = QLabel("F1 Fast Lap Lab")
         title.setObjectName("title")
         self.title_label = title
-        subtitle = QLabel("Simulador local con referencias reales precargadas en JSON/CSV y comparacion de estrategias.")
+        subtitle = QLabel("Comparador de vuelta rapida entre dos pilotos con autos, neumaticos, clima y eventos de riesgo.")
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
         self.subtitle_label = subtitle
@@ -542,13 +566,13 @@ class MainWindow(QMainWindow):
             "ta": KpiCard("Tiempo total A", PALETTE["accent"]),
             "tb": KpiCard("Tiempo total B", PALETTE["cyan"]),
             "df": KpiCard("Diferencia", PALETTE["green"]),
-            "ba": KpiCard("Mejor vuelta A", PALETTE["accent"]),
-            "bb": KpiCard("Mejor vuelta B", PALETTE["cyan"]),
+            "ea": KpiCard("Penalizacion A", PALETTE["accent"]),
+            "eb": KpiCard("Penalizacion B", PALETTE["cyan"]),
         }
         right_layout.addWidget(self.kpi_host)
 
-        brief = Card("Race Brief")
-        self.note = QLabel("Listo para cargar una sesion real y comparar estrategias.")
+        brief = Card("Fast Lap Brief")
+        self.note = QLabel("Listo para simular una vuelta lanzada al limite.")
         self.note.setObjectName("muted")
         self.note.setWordWrap(True)
         brief.layout.addWidget(self.note)
@@ -596,9 +620,19 @@ class MainWindow(QMainWindow):
         self.canvas = FigureCanvasQTAgg(self.figure)
         charts_card.layout.addWidget(self.canvas)
         analysis_layout.addWidget(charts_card, 1)
-        table_card = Card("Detalle Por Vuelta")
-        self.table = QTableWidget(0, 11)
-        self.table.setHorizontalHeaderLabels(["Vuelta", "A tiempo", "A desgaste", "A combustible", "A goma", "A parada", "B tiempo", "B desgaste", "B combustible", "B goma", "B parada"])
+        table_card = Card("Detalle De Intento")
+        self.table = QTableWidget(0, 9)
+        self.table.setHorizontalHeaderLabels([
+            "Piloto",
+            "Tiempo",
+            "Auto",
+            "Neumatico",
+            "Temp inicial",
+            "Temp final",
+            "Desgaste final",
+            "Eventos",
+            "Penalizacion",
+        ])
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(False)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -606,10 +640,48 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setStretchLastSection(True)
         table_card.layout.addWidget(self.table)
+        table_card.layout.addWidget(self._event_legend_widget())
         analysis_layout.addWidget(table_card, 1)
         tabs.addTab(analysis_tab, "Analisis")
         self.relayout_kpis()
         self.update_responsive_layout()
+
+    def _event_legend_widget(self):
+        legend = QFrame()
+        legend.setObjectName("sidebar")
+        root = QVBoxLayout(legend)
+        root.setContentsMargins(0, 2, 0, 0)
+        root.setSpacing(6)
+
+        title = QLabel("Leyenda de eventos:")
+        title.setObjectName("muted")
+        root.addWidget(title)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+
+        clean = QLabel("Limpia")
+        clean.setStyleSheet(
+            "color:#9ee6b8; background:#153327; border:1px solid #2a6b49; border-radius:10px; padding:4px 10px;"
+        )
+        row.addWidget(clean)
+
+        caution = QLabel("Derrape / Drag")
+        caution.setStyleSheet(
+            "color:#ffd27a; background:#3a2b12; border:1px solid #7c5a22; border-radius:10px; padding:4px 10px;"
+        )
+        row.addWidget(caution)
+
+        severe = QLabel("Choque")
+        severe.setStyleSheet(
+            "color:#ff7f7f; background:#3f1a1f; border:1px solid #7c2f3a; border-radius:10px; padding:4px 10px;"
+        )
+        row.addWidget(severe)
+
+        row.addStretch(1)
+        root.addLayout(row)
+        return legend
 
     def _add_field(self, key, widget):
         self.fields[key] = widget
@@ -625,16 +697,15 @@ class MainWindow(QMainWindow):
         year = self._add_field("year", QComboBox())
         year.currentTextChanged.connect(self.on_reference_selection_changed)
         session = self._add_field("session", QComboBox())
-        session.currentTextChanged.connect(self.on_reference_selection_changed)
+        session.setEnabled(False)
         self.real_year_combo = year
         self.real_session_combo = session
 
         self.real_field_year = Field("Temporada", year)
-        self.real_field_session = Field("Sesion", session)
+        self.real_field_session = Field("Sesion referencia (auto)", session)
         grid.addWidget(self.real_field_year, 0, 0)
-        grid.addWidget(self.real_field_session, 0, 1)
 
-        self.real_status = QLabel("Referencia local: elegi circuito abajo y aca solo temporada/sesion disponibles para ese circuito.")
+        self.real_status = QLabel("Modo fijo: vuelta rapida. Se usa automaticamente una sesion de referencia local para calibrar datos.")
         self.real_status.setObjectName("muted")
         self.real_status.setWordWrap(True)
 
@@ -643,17 +714,14 @@ class MainWindow(QMainWindow):
         return card
 
     def _car_card(self):
-        card = Card("Auto Y Circuito")
+        card = Card("Condiciones De Vuelta")
         grid = QGridLayout()
         self.car_grid = grid
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(10)
 
-        team = self._add_field("car", QComboBox())
-        team.addItems(list(TEAMS.keys()))
-        team.setCurrentText("Ferrari")
         circuit = self._add_field("track", QComboBox())
-        local_tracks = available_reference_tracks() or list(TRACKS.keys())
+        local_tracks = list(dict.fromkeys((available_reference_tracks() or []) + list(TRACKS.keys())))
         circuit.addItems(local_tracks)
         circuit.setCurrentText("Monza" if "Monza" in local_tracks else local_tracks[0])
         circuit.currentTextChanged.connect(self.on_track_selection_changed)
@@ -662,72 +730,52 @@ class MainWindow(QMainWindow):
         weather.setCurrentText("dry")
         integration = self._add_field("integrationMethod", QComboBox())
         integration.addItems(["Euler", "RK4"])
-        integration.setCurrentText("Euler")
-        laps = self._add_field("laps", QLineEdit(str(TRACKS["Monza"]["raceLaps"])))
+        integration.setCurrentText("RK4")
+        laps = self._add_field("laps", QLineEdit("1"))
+        laps.setEnabled(False)
+        seed = self._add_field("seed", QLineEdit("42"))
 
-        apply_team = QPushButton("Aplicar Equipo")
-        apply_team.clicked.connect(self.apply_team)
         apply_track = QPushButton("Aplicar Circuito")
         apply_track.clicked.connect(self.apply_track_defaults)
-        self.apply_team_btn = apply_team
         self.apply_track_btn = apply_track
 
-        perf_keys = [
-            ("power", "Potencia (kW)"),
-            ("mass", "Masa (kg)"),
-            ("drag", "Drag CdA"),
-            ("downforce", "Carga aero"),
-            ("traction", "Traccion"),
-            ("brake", "Frenado"),
-            ("ers", "ERS"),
-            ("topSpeedKph", "Vel punta (km/h)"),
-        ]
-        perf_widgets = {key: self._add_field(key, QLineEdit()) for key, _ in perf_keys}
-
-        self.car_field_team = Field("Equipo 2026", team)
         self.car_field_track = Field("Circuito", circuit)
         self.car_field_weather = Field("Clima", weather)
         self.car_field_integration = Field("Metodo Numerico", integration)
-        self.car_field_laps = Field("Vueltas", laps)
-        grid.addWidget(self.car_field_team, 0, 0, 1, 2)
-        grid.addWidget(apply_team, 1, 0, 1, 2)
-        grid.addWidget(self.car_field_track, 2, 0)
-        grid.addWidget(self.car_field_weather, 2, 1)
-        grid.addWidget(self.car_field_integration, 3, 0)
-        grid.addWidget(self.car_field_laps, 3, 1)
-        grid.addWidget(apply_track, 4, 0, 1, 2)
-
-        base = 5
-        self.perf_field_widgets = []
-        for idx, (key, label) in enumerate(perf_keys):
-            field = Field(label, perf_widgets[key])
-            self.perf_field_widgets.append(field)
-            grid.addWidget(field, base + idx // 2, idx % 2)
+        self.car_field_laps = Field("Vueltas simuladas", laps)
+        self.car_field_seed = Field("Seed (reproducibilidad)", seed)
+        grid.addWidget(self.car_field_track, 0, 0)
+        grid.addWidget(self.car_field_weather, 0, 1)
+        grid.addWidget(self.car_field_integration, 1, 0)
+        grid.addWidget(self.car_field_laps, 1, 1)
+        grid.addWidget(self.car_field_seed, 2, 0, 1, 2)
+        grid.addWidget(apply_track, 3, 0, 1, 2)
 
         card.layout.addLayout(grid)
         return card
 
     def _strategy_card(self):
-        card = Card("Estrategias")
+        card = Card("Pilotos Y Configuracion")
         row = QBoxLayout(QBoxLayout.LeftToRight)
         row.setSpacing(10)
         self.strategy_row = row
-        plan_a = Card("Plan A")
-        plan_b = Card("Plan B")
+        plan_a = Card("Piloto A")
+        plan_b = Card("Piloto B")
         self.plan_a_card = plan_a
         self.plan_b_card = plan_b
         plan_a.setObjectName("card")
         plan_b.setObjectName("card")
-        self.plan_field_wrappers = {"A": {}, "B": {}}
 
         for key, label, default, values in [
-            ("tireA", "Neumatico", "C3 Medium", list(TIRES.keys())),
-            ("fuelA", "Combustible", "100", None),
-            ("stopsA", "Paradas", "1", None),
-            ("degradeA", "Degradacion", "1.0", None),
-            ("pitTire1A", "Goma Pit 1", "C2 Hard", list(TIRES.keys())),
-            ("pitTire2A", "Goma Pit 2", "C3 Medium", list(TIRES.keys())),
-            ("pitTire3A", "Goma Pit 3", "C4 Soft", list(TIRES.keys())),
+            ("profileA", "Perfil F1", "Max Verstappen", list(PILOT_PROFILES.keys())),
+            ("driverNameA", "Nombre piloto", "Piloto A", None),
+            ("carA", "Auto", "Ferrari", list(TEAMS.keys())),
+            ("tireA", "Neumatico", "C4 Soft", list(TIRES.keys())),
+            ("tireTempA", "Temp inicial goma (C)", "97", None),
+            ("tireWearA", "Desgaste inicial (%)", "4", None),
+            ("skillA", "Habilidad (0-1)", "0.90", None),
+            ("aggressionA", "Agresividad (0-1)", "0.72", None),
+            ("consistencyA", "Consistencia (0-1)", "0.85", None),
         ]:
             widget = QComboBox() if values else QLineEdit(default)
             if values:
@@ -736,16 +784,19 @@ class MainWindow(QMainWindow):
             self._add_field(key, widget)
             field = Field(label, widget)
             plan_a.layout.addWidget(field)
-            self.plan_field_wrappers["A"][key] = field
+            if key == "profileA":
+                widget.currentTextChanged.connect(lambda _value, s="A": self.apply_driver_profile(s))
 
         for key, label, default, values in [
-            ("tireB", "Neumatico", "C4 Soft", list(TIRES.keys())),
-            ("fuelB", "Combustible", "100", None),
-            ("stopsB", "Paradas", "2", None),
-            ("degradeB", "Degradacion", "1.0", None),
-            ("pitTire1B", "Goma Pit 1", "C3 Medium", list(TIRES.keys())),
-            ("pitTire2B", "Goma Pit 2", "C2 Hard", list(TIRES.keys())),
-            ("pitTire3B", "Goma Pit 3", "C4 Soft", list(TIRES.keys())),
+            ("profileB", "Perfil F1", "Lando Norris", list(PILOT_PROFILES.keys())),
+            ("driverNameB", "Nombre piloto", "Piloto B", None),
+            ("carB", "Auto", "McLaren", list(TEAMS.keys())),
+            ("tireB", "Neumatico", "C5 Soft", list(TIRES.keys())),
+            ("tireTempB", "Temp inicial goma (C)", "99", None),
+            ("tireWearB", "Desgaste inicial (%)", "4", None),
+            ("skillB", "Habilidad (0-1)", "0.88", None),
+            ("aggressionB", "Agresividad (0-1)", "0.78", None),
+            ("consistencyB", "Consistencia (0-1)", "0.83", None),
         ]:
             widget = QComboBox() if values else QLineEdit(default)
             if values:
@@ -754,12 +805,14 @@ class MainWindow(QMainWindow):
             self._add_field(key, widget)
             field = Field(label, widget)
             plan_b.layout.addWidget(field)
-            self.plan_field_wrappers["B"][key] = field
+            if key == "profileB":
+                widget.currentTextChanged.connect(lambda _value, s="B": self.apply_driver_profile(s))
 
         row.addWidget(plan_a, 1)
         row.addWidget(plan_b, 1)
         card.layout.addLayout(row)
-        self._wire_stop_fields()
+        self.apply_driver_profile("A")
+        self.apply_driver_profile("B")
         return card
 
     def _actions_card(self):
@@ -787,13 +840,28 @@ class MainWindow(QMainWindow):
                 item.widget().setParent(self.kpi_host)
         width = max(1, self.kpi_host.width() or self.width())
         columns = 5 if width >= 1500 else 3 if width >= 1100 else 2
-        keys = ("ta", "tb", "df", "ba", "bb")
+        keys = ("ta", "tb", "df", "ea", "eb")
         for idx, key in enumerate(keys):
             row = idx // columns
             col = idx % columns
             self.kpi_grid.addWidget(self.kpis[key], row, col)
         for col in range(columns):
             self.kpi_grid.setColumnStretch(col, 1)
+
+    def format_events(self, event_counts):
+        mapping = [
+            ("derrape", "Derrape"),
+            ("drag", "Drag"),
+            ("choque", "Choque"),
+            ("frenada_temprana", "Frenada temprana"),
+            ("neumatico_excesivamente_gastado", "Neumatico gastado"),
+        ]
+        chunks = []
+        for key, label in mapping:
+            count = int(event_counts.get(key, 0))
+            if count > 0:
+                chunks.append(f"{label} x{count}")
+        return " | ".join(chunks) if chunks else "Limpia"
 
     def update_responsive_layout(self):
         width = self.width()
@@ -830,30 +898,34 @@ class MainWindow(QMainWindow):
             self.real_grid.addWidget(self.real_field_year, 0, 0)
             self.real_grid.addWidget(self.real_field_session, 1, 0)
 
-            self.car_grid.addWidget(self.car_field_team, 0, 0, 1, 2)
-            self.car_grid.addWidget(self.apply_team_btn, 1, 0, 1, 2)
-            self.car_grid.addWidget(self.car_field_track, 2, 0, 1, 2)
-            self.car_grid.addWidget(self.car_field_weather, 3, 0, 1, 2)
-            self.car_grid.addWidget(self.car_field_integration, 4, 0, 1, 2)
-            self.car_grid.addWidget(self.car_field_laps, 5, 0, 1, 2)
-            self.car_grid.addWidget(self.apply_track_btn, 6, 0, 1, 2)
-            base = 7
-            for idx, field in enumerate(self.perf_field_widgets):
-                self.car_grid.addWidget(field, base + idx, 0, 1, 2)
+            self.car_grid.addWidget(self.car_field_track, 0, 0, 1, 2)
+            self.car_grid.addWidget(self.car_field_weather, 1, 0, 1, 2)
+            self.car_grid.addWidget(self.car_field_integration, 2, 0, 1, 2)
+            self.car_grid.addWidget(self.car_field_laps, 3, 0, 1, 2)
+            self.car_grid.addWidget(self.car_field_seed, 4, 0, 1, 2)
+            self.car_grid.addWidget(self.apply_track_btn, 5, 0, 1, 2)
         else:
             self.real_grid.addWidget(self.real_field_year, 0, 0)
             self.real_grid.addWidget(self.real_field_session, 0, 1)
 
-            self.car_grid.addWidget(self.car_field_team, 0, 0, 1, 2)
-            self.car_grid.addWidget(self.apply_team_btn, 1, 0, 1, 2)
-            self.car_grid.addWidget(self.car_field_track, 2, 0)
-            self.car_grid.addWidget(self.car_field_weather, 2, 1)
-            self.car_grid.addWidget(self.car_field_integration, 3, 0)
-            self.car_grid.addWidget(self.car_field_laps, 3, 1)
-            self.car_grid.addWidget(self.apply_track_btn, 4, 0, 1, 2)
-            base = 5
-            for idx, field in enumerate(self.perf_field_widgets):
-                self.car_grid.addWidget(field, base + idx // 2, idx % 2)
+            self.car_grid.addWidget(self.car_field_track, 0, 0)
+            self.car_grid.addWidget(self.car_field_weather, 0, 1)
+            self.car_grid.addWidget(self.car_field_integration, 1, 0)
+            self.car_grid.addWidget(self.car_field_laps, 1, 1)
+            self.car_grid.addWidget(self.car_field_seed, 2, 0, 1, 2)
+            self.car_grid.addWidget(self.apply_track_btn, 3, 0, 1, 2)
+
+    def apply_driver_profile(self, suffix):
+        profile_name = self.field_text(f"profile{suffix}")
+        profile = PILOT_PROFILES.get(profile_name)
+        if not profile:
+            return
+        self.set_field_text(f"driverName{suffix}", profile_name)
+        self.set_field_text(f"car{suffix}", profile["team"])
+        self.set_field_text(f"skill{suffix}", f"{profile['skill']:.2f}")
+        self.set_field_text(f"aggression{suffix}", f"{profile['aggression']:.2f}")
+        self.set_field_text(f"consistency{suffix}", f"{profile['consistency']:.2f}")
+        self.set_field_text(f"tire{suffix}", profile["tire"])
 
     def field_text(self, key):
         widget = self.fields[key]
@@ -865,38 +937,15 @@ class MainWindow(QMainWindow):
             widget.setCurrentText(str(value))
         else:
             widget.setText(str(value))
-        if key in ("stopsA", "stopsB"):
-            self.update_stint_fields(key[-1])
 
     def _wire_stop_fields(self):
-        self.fields["stopsA"].editingFinished.connect(lambda: self.update_stint_fields("A"))
-        self.fields["stopsB"].editingFinished.connect(lambda: self.update_stint_fields("B"))
-        self.update_stint_fields("A")
-        self.update_stint_fields("B")
+        return
 
     def update_stint_fields(self, suffix):
-        try:
-            stops = max(0, min(3, int(float(self.field_text(f"stops{suffix}")))))
-        except Exception:
-            stops = 0
-        for idx in range(1, 4):
-            key = f"pitTire{idx}{suffix}"
-            widget = self.fields[key]
-            wrapper = self.plan_field_wrappers[suffix][key]
-            enabled = idx <= stops
-            wrapper.setVisible(enabled)
-            widget.setEnabled(enabled)
+        return
 
     def apply_team(self):
-        c = TEAMS[self.field_text("car")]
-        self.set_field_text("power", c["power"])
-        self.set_field_text("mass", c["mass"])
-        self.set_field_text("drag", c["drag"])
-        self.set_field_text("downforce", c["downforce"])
-        self.set_field_text("traction", c["traction"])
-        self.set_field_text("brake", c["brake"])
-        self.set_field_text("ers", c["ers"])
-        self.set_field_text("topSpeedKph", int(348 - (c["drag"] - 0.81) * 80 + (c["power"] - 748) * 0.9))
+        return
 
     def apply_track_defaults(self):
         self.sync_local_reference_options()
@@ -917,7 +966,6 @@ class MainWindow(QMainWindow):
         years = available_reference_years(track)
 
         current_year = self.real_year_combo.currentText() if hasattr(self, "real_year_combo") else ""
-        current_session = self.real_session_combo.currentText() if hasattr(self, "real_session_combo") else ""
 
         self.real_year_combo.blockSignals(True)
         self.real_year_combo.clear()
@@ -931,8 +979,8 @@ class MainWindow(QMainWindow):
         self.real_session_combo.blockSignals(True)
         self.real_session_combo.clear()
         self.real_session_combo.addItems(sessions or ["Q"])
-        if current_session in sessions:
-            self.real_session_combo.setCurrentText(current_session)
+        preferred = "Q" if "Q" in sessions else (sessions[0] if sessions else "Q")
+        self.real_session_combo.setCurrentText(preferred)
         self.real_session_combo.blockSignals(False)
 
     def sprint_laps_for_track(self, track_name):
@@ -940,101 +988,53 @@ class MainWindow(QMainWindow):
         return max(16, round(100.0 / max(0.1, lap_km)))
 
     def apply_session_preset(self, *_args):
-        session_name = self.field_text("session").strip().upper()
-        track_name = self.field_text("track")
-        race_laps = TRACKS[track_name]["raceLaps"]
-        presets = {
-            "Q": dict(
-                laps=1,
-                fuel=6,
-                stops=0,
-                degrade=0.35,
-                tire_a="C5 Soft",
-                tire_b="C4 Soft",
-                pit1_a="C4 Soft",
-                pit1_b="C3 Medium",
-                status="Preset de clasificacion aplicado: poco combustible, una vuelta lanzada y goma blanda.",
-            ),
-            "SQ": dict(
-                laps=1,
-                fuel=8,
-                stops=0,
-                degrade=0.40,
-                tire_a="C5 Soft",
-                tire_b="C4 Soft",
-                pit1_a="C4 Soft",
-                pit1_b="C3 Medium",
-                status="Preset de sprint qualifying aplicado: intento corto y setup agresivo.",
-            ),
-            "S": dict(
-                laps=self.sprint_laps_for_track(track_name),
-                fuel=self.sprint_laps_for_track(track_name) * 1.9,
-                stops=0,
-                degrade=0.82,
-                tire_a="C4 Soft",
-                tire_b="C3 Medium",
-                pit1_a="C3 Medium",
-                pit1_b="C2 Hard",
-                status="Preset de sprint aplicado: distancia corta, combustible intermedio y sin parada por defecto.",
-            ),
-            "R": dict(
-                laps=race_laps,
-                fuel=race_laps * TRACKS[track_name]["fuelPerLapKg"] * 1.02,
-                stops=1,
-                degrade=1.00,
-                tire_a="C3 Medium",
-                tire_b="C4 Soft",
-                pit1_a="C2 Hard",
-                pit1_b="C3 Medium",
-                status="Preset de carrera aplicado: combustible completo y estrategia base de stint.",
-            ),
-        }
-        preset = presets.get(session_name)
-        if not preset:
-            self.real_status.setText(f"Sesion {session_name}: sin preset automatico. Ajusta libremente para pruebas.")
-            return
+        preset = dict(
+            tire_a="C5 Soft",
+            tire_b="C4 Soft",
+            temp_a=98,
+            temp_b=98,
+            wear=4,
+            status="Modo fijo de vuelta rapida aplicado: una vuelta lanzada con preparacion automatica.",
+        )
 
-        self.set_field_text("laps", preset["laps"])
-        self.set_field_text("fuelA", f"{preset['fuel']:.1f}")
-        self.set_field_text("fuelB", f"{preset['fuel']:.1f}")
-        self.set_field_text("stopsA", preset["stops"])
-        self.set_field_text("stopsB", preset["stops"])
-        self.set_field_text("degradeA", preset["degrade"])
-        self.set_field_text("degradeB", preset["degrade"])
+        self.set_field_text("laps", 1)
         self.set_field_text("tireA", preset["tire_a"])
         self.set_field_text("tireB", preset["tire_b"])
-        self.set_field_text("pitTire1A", preset["pit1_a"])
-        self.set_field_text("pitTire1B", preset["pit1_b"])
-        self.set_field_text("pitTire2A", "C2 Hard")
-        self.set_field_text("pitTire2B", "C2 Hard")
-        self.set_field_text("pitTire3A", "C3 Medium")
-        self.set_field_text("pitTire3B", "C3 Medium")
+        self.set_field_text("tireTempA", preset["temp_a"])
+        self.set_field_text("tireTempB", preset["temp_b"])
+        self.set_field_text("tireWearA", preset["wear"])
+        self.set_field_text("tireWearB", preset["wear"])
         self.real_status.setText(preset["status"])
 
     def build_cfg(self, suffix):
         try:
+            team_name = self.field_text(f"car{suffix}")
+            team = TEAMS[team_name]
             return dict(
-                teamName=self.field_text("car"),
-                power=float(self.field_text("power")),
-                mass=float(self.field_text("mass")),
-                drag=float(self.field_text("drag")),
-                downforce=float(self.field_text("downforce")),
-                traction=float(self.field_text("traction")),
-                brake=float(self.field_text("brake")),
-                ers=float(self.field_text("ers")),
-                topSpeedKph=float(self.field_text("topSpeedKph")),
+                mode="fastlap",
+                driverName=self.field_text(f"driverName{suffix}").strip() or f"Piloto {suffix}",
+                teamName=team_name,
+                power=float(team["power"]),
+                mass=float(team["mass"]),
+                drag=float(team["drag"]),
+                downforce=float(team["downforce"]),
+                traction=float(team["traction"]),
+                brake=float(team["brake"]),
+                ers=float(team["ers"]),
+                topSpeedKph=float(348 - (team["drag"] - 0.81) * 80 + (team["power"] - 748) * 0.9),
                 trackName=self.field_text("track"),
-                laps=int(float(self.field_text("laps"))),
+                laps=1,
                 weather=self.field_text("weather"),
                 sessionName=self.field_text("session"),
                 integrationMethod=self.field_text("integrationMethod"),
                 tireName=self.field_text(f"tire{suffix}"),
-                pitTire1=self.field_text(f"pitTire1{suffix}"),
-                pitTire2=self.field_text(f"pitTire2{suffix}"),
-                pitTire3=self.field_text(f"pitTire3{suffix}"),
-                fuel=float(self.field_text(f"fuel{suffix}")),
-                stops=int(float(self.field_text(f"stops{suffix}"))),
-                degrade=float(self.field_text(f"degrade{suffix}")),
+                tireTempC=float(self.field_text(f"tireTemp{suffix}")),
+                tireWearPct=float(self.field_text(f"tireWear{suffix}")),
+                pilotSkill=float(self.field_text(f"skill{suffix}")),
+                pilotAggression=float(self.field_text(f"aggression{suffix}")),
+                pilotConsistency=float(self.field_text(f"consistency{suffix}")),
+                fuel=5.5,
+                seed=int(float(self.field_text("seed"))),
             )
         except Exception as exc:
             raise ValueError("Revisa los valores numericos.") from exc
@@ -1046,7 +1046,7 @@ class MainWindow(QMainWindow):
         ref = load_reference_profile(track, year=year, session=session)
         if ref and int(ref.get("year", 0)) == year and str(ref.get("session", "")).upper() == session.upper():
             self.loaded_ref = ref
-            self.real_status.setText(f"Datos locales: {track} {year} {session} listos")
+            self.real_status.setText(f"Referencia local: {track} {year} {session} lista")
             refresh_real_track(track)
             if on_ready:
                 on_ready()
@@ -1057,24 +1057,25 @@ class MainWindow(QMainWindow):
             fallback_year = fallback_ref.get("year", "?")
             fallback_session = fallback_ref.get("session", "?")
             self.real_status.setText(
-                f"Datos locales: usando {track} {fallback_year} {fallback_session} porque {year} {session} no esta cargado."
+                f"Referencia local: usando {track} {fallback_year} {fallback_session} porque {year} {session} no esta cargado."
             )
             refresh_real_track(track)
             if on_ready:
                 on_ready()
             return fallback_ref
-        available = ", ".join(available_reference_sessions(track)) or "ninguna"
-        raise RuntimeError(
-            f"No hay datos locales para {track} {year} {session}. "
-            f"Sesiones locales disponibles: {available}."
+        self.loaded_ref = None
+        self.real_status.setText(
+            f"Sin referencia local para {track} {year} {session}. Se simulara con parametros de pista base."
         )
+        refresh_real_track(track)
+        if on_ready:
+            on_ready()
+        return None
 
     def _run_simulation_after_data(self):
         try:
             cfg_a = self.build_cfg("A")
             cfg_b = self.build_cfg("B")
-            if cfg_a["laps"] < 1:
-                raise ValueError("Las vueltas deben ser mayores a cero.")
             self.res_a = simulate(cfg_a)
             self.res_b = simulate(cfg_b)
         except Exception as exc:
@@ -1112,21 +1113,23 @@ class MainWindow(QMainWindow):
         self.kpis["ta"].value.setText(fmt_sec(self.res_a["total"]) if a_finished else "DNF")
         self.kpis["tb"].value.setText(fmt_sec(self.res_b["total"]) if b_finished else "DNF")
         self.kpis["df"].value.setText(diff_text)
-        self.kpis["ba"].value.setText(fmt_sec(self.res_a["best"]) if self.res_a["laps"] else "-")
-        self.kpis["bb"].value.setText(fmt_sec(self.res_b["best"]) if self.res_b["laps"] else "-")
+        self.kpis["ea"].value.setText(f"+{self.res_a.get('eventPenalty', 0):.2f} s")
+        self.kpis["eb"].value.setText(f"+{self.res_b.get('eventPenalty', 0):.2f} s")
         ref = self.loaded_ref or load_reference_profile(cfg_a["trackName"]) or {}
         src = f"{ref.get('event', cfg_a['trackName'])} {ref.get('year', self.field_text('year'))} {ref.get('session', self.field_text('session'))}"
-        pa = f"A para en vueltas {', '.join(map(str, self.res_a['pitLaps']))}" if self.res_a["pitLaps"] else "A no para"
-        pb = f"B para en vueltas {', '.join(map(str, self.res_b['pitLaps']))}" if self.res_b["pitLaps"] else "B no para"
-        tire_plan_a = " -> ".join(self.res_a.get("tirePlan", []))
-        tire_plan_b = " -> ".join(self.res_b.get("tirePlan", []))
-        fuel_note_a = f"A DNF por combustible en vuelta {self.res_a['retiredLap']}." if not a_finished else ""
-        fuel_note_b = f"B DNF por combustible en vuelta {self.res_b['retiredLap']}." if not b_finished else ""
+        events_a = self.res_a.get("eventCounts", {})
+        events_b = self.res_b.get("eventCounts", {})
+        events_a_txt = self.format_events(events_a)
+        events_b_txt = self.format_events(events_b)
         method_name = cfg_a.get("integrationMethod", "Euler")
+        start_a = self.res_a.get("flyingStartSpeedKph", 0.0)
+        start_b = self.res_b.get("flyingStartSpeedKph", 0.0)
         self.note.setText(
-            f"Estrategia {winner} gana. {pa}. {pb}. "
-            f"Plan A: {tire_plan_a}. Plan B: {tire_plan_b}. Sesion: {cfg_a.get('sessionName', self.field_text('session'))}. Metodo: {method_name}. "
-            f"{fuel_note_a} {fuel_note_b} Datos reales: {src}."
+            f"Intento {winner} mas rapido. "
+            f"A ({cfg_a['driverName']} - {cfg_a['teamName']}): {cfg_a['tireName']} / {events_a_txt}. "
+            f"B ({cfg_b['driverName']} - {cfg_b['teamName']}): {cfg_b['tireName']} / {events_b_txt}. "
+            f"Vueltas de preparacion: salida lanzada A {start_a:.1f} km/h, B {start_b:.1f} km/h. "
+            f"Sesion de referencia: {cfg_a.get('sessionName', self.field_text('session'))}. Metodo: {method_name}. Datos reales: {src}."
         )
         self.track_name = cfg_a["trackName"]
         self.update_charts()
@@ -1145,23 +1148,25 @@ class MainWindow(QMainWindow):
             ax.tick_params(colors=PALETTE["muted"])
             for spine in ax.spines.values():
                 spine.set_color(PALETTE["line"])
-        xa = list(range(1, len(self.res_a["laps"]) + 1))
-        xb = list(range(1, len(self.res_b["laps"]) + 1))
-        self.axes[0].plot(xa, [l["time"] for l in self.res_a["laps"]], color=colors[0], linewidth=2.2, label="Plan A")
-        self.axes[0].plot(xb, [l["time"] for l in self.res_b["laps"]], color=colors[1], linewidth=2.2, label="Plan B")
-        self.axes[0].set_title("Tiempo Por Vuelta", color=PALETTE["ink"])
-        self.axes[1].plot(xa, [l["wear"] for l in self.res_a["laps"]], color=colors[0], linewidth=2.2, label="Plan A")
-        self.axes[1].plot(xb, [l["wear"] for l in self.res_b["laps"]], color=colors[1], linewidth=2.2, label="Plan B")
-        self.axes[1].set_title("Desgaste Neumatico", color=PALETTE["ink"])
-        self.axes[2].plot(xa, [l["fuel"] for l in self.res_a["laps"]], color=colors[0], linewidth=2.2, label="Plan A")
-        self.axes[2].plot(xb, [l["fuel"] for l in self.res_b["laps"]], color=colors[1], linewidth=2.2, label="Plan B")
-        self.axes[2].set_title("Combustible Remanente", color=PALETTE["ink"])
+        labels = ["Piloto A", "Piloto B"]
+        totals = [self.res_a["total"], self.res_b["total"]]
+        self.axes[0].bar(labels, totals, color=colors)
+        self.axes[0].set_title("Tiempo De Vuelta", color=PALETTE["ink"])
+
+        wear_vals = [self.res_a["laps"][0]["wear"], self.res_b["laps"][0]["wear"]]
+        self.axes[1].bar(labels, wear_vals, color=colors)
+        self.axes[1].set_title("Desgaste Final (%)", color=PALETTE["ink"])
+
+        temp_vals = [self.res_a["laps"][0].get("tireTemp", 0), self.res_b["laps"][0].get("tireTemp", 0)]
+        self.axes[2].bar(labels, temp_vals, color=colors)
+        self.axes[2].set_title("Temperatura Final Goma (C)", color=PALETTE["ink"])
+
         cats = ["straight", "fast", "slow"]
         la = [self.res_a["avgSegment"][k] for k in cats]
         lb = [self.res_b["avgSegment"][k] for k in cats]
         xs = [0, 1, 2]
-        self.axes[3].bar([i - 0.18 for i in xs], la, 0.36, color=colors[0], label="Plan A")
-        self.axes[3].bar([i + 0.18 for i in xs], lb, 0.36, color=colors[1], label="Plan B")
+        self.axes[3].bar([i - 0.18 for i in xs], la, 0.36, color=colors[0], label="Piloto A")
+        self.axes[3].bar([i + 0.18 for i in xs], lb, 0.36, color=colors[1], label="Piloto B")
         self.axes[3].set_xticks(xs, ["Recta", "Curva rapida", "Curva lenta"])
         self.axes[3].set_title("Velocidad Promedio", color=PALETTE["ink"])
         for ax in self.axes:
@@ -1173,47 +1178,54 @@ class MainWindow(QMainWindow):
         self.canvas.draw_idle()
 
     def update_table(self):
-        n = max(len(self.res_a["laps"]), len(self.res_b["laps"]))
-        self.table.setRowCount(n)
-        for i in range(n):
-            a = self.res_a["laps"][i] if i < len(self.res_a["laps"]) else None
-            b = self.res_b["laps"][i] if i < len(self.res_b["laps"]) else None
+        self.table.setRowCount(2)
+        configs = [self.build_cfg("A"), self.build_cfg("B")]
+        rows = [self.res_a, self.res_b]
+        for i, (cfg, res) in enumerate(zip(configs, rows)):
+            lap = res["laps"][0] if res.get("laps") else {}
+            events = res.get("eventCounts", {})
+            ev_text = self.format_events(events)
             values = [
-                str(i + 1),
-                f"{a['time']:.3f} s" if a else "-",
-                f"{a['wear']:.1f} %" if a else "-",
-                f"{a['fuel']:.1f} kg" if a else "-",
-                a["tire"] if a else "-",
-                "Si" if a and a["pit"] else "No",
-                f"{b['time']:.3f} s" if b else "-",
-                f"{b['wear']:.1f} %" if b else "-",
-                f"{b['fuel']:.1f} kg" if b else "-",
-                b["tire"] if b else "-",
-                "Si" if b and b["pit"] else "No",
+                cfg["driverName"],
+                (fmt_sec(res["total"]) if res.get("finished") else "DNF"),
+                cfg["teamName"],
+                cfg["tireName"],
+                f"{cfg['tireTempC']:.1f} C",
+                f"{lap.get('tireTemp', 0):.1f} C",
+                f"{lap.get('wear', 0):.1f} %",
+                ev_text,
+                f"{res.get('eventPenalty', 0):.2f} s",
             ]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setTextAlignment(Qt.AlignCenter)
+                if col == 7:
+                    if ev_text == "Limpia":
+                        item.setForeground(QColor("#9ee6b8"))
+                    elif "Choque" in ev_text:
+                        item.setForeground(QColor("#ff7f7f"))
+                    elif "Derrape" in ev_text or "Drag" in ev_text:
+                        item.setForeground(QColor("#ffd27a"))
                 self.table.setItem(i, col, item)
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
-        self.table.setColumnWidth(0, 72)
+        self.table.setColumnWidth(0, 110)
 
     def swap_plans(self):
         for ka, kb in (
+            ("profileA", "profileB"),
+            ("driverNameA", "driverNameB"),
+            ("carA", "carB"),
             ("tireA", "tireB"),
-            ("pitTire1A", "pitTire1B"),
-            ("pitTire2A", "pitTire2B"),
-            ("pitTire3A", "pitTire3B"),
-            ("fuelA", "fuelB"),
-            ("stopsA", "stopsB"),
-            ("degradeA", "degradeB"),
+            ("tireTempA", "tireTempB"),
+            ("tireWearA", "tireWearB"),
+            ("skillA", "skillB"),
+            ("aggressionA", "aggressionB"),
+            ("consistencyA", "consistencyB"),
         ):
             va, vb = self.field_text(ka), self.field_text(kb)
             self.set_field_text(ka, vb)
             self.set_field_text(kb, va)
-        self.update_stint_fields("A")
-        self.update_stint_fields("B")
         self.run_simulation()
 
     def restart_view(self):
@@ -1237,8 +1249,9 @@ class MainWindow(QMainWindow):
         if not self.geo:
             self.track_widget.set_scene(None)
             return
-        team = self.field_text("car")
-        self.track_widget.set_scene(self.geo, team_a=team, team_b=team)
+        team_a = self.field_text("carA")
+        team_b = self.field_text("carB")
+        self.track_widget.set_scene(self.geo, team_a=team_a, team_b=team_b)
         if reset_time:
             self.vtime = 0.0
 
@@ -1261,12 +1274,13 @@ class MainWindow(QMainWindow):
             self.last_ts = now
         a = state_at(self.res_a, track, self.vtime)
         b = state_at(self.res_b, track, self.vtime)
-        team = self.field_text("car")
-        self.track_widget.set_scene(self.geo, a, b, team_a=team, team_b=team)
+        team_a = self.field_text("carA")
+        team_b = self.field_text("carB")
+        self.track_widget.set_scene(self.geo, a, b, team_a=team_a, team_b=team_b)
         lead = "A" if a["pRace"] > b["pRace"] else "B"
         self.vmsg.setText(
-            f"t={self.vtime:.1f}s | A V{a['lap']} {a['speed']:.0f} km/h {'(BOX)' if a['pit'] else ''} | "
-            f"B V{b['lap']} {b['speed']:.0f} km/h {'(BOX)' if b['pit'] else ''} | Lider: {lead}"
+            f"t={self.vtime:.1f}s | A V{a['lap']} {a['speed']:.0f} km/h | "
+            f"B V{b['lap']} {b['speed']:.0f} km/h | Lider: {lead}"
         )
         if self.vtime >= tref and self.vrun:
             self.vrun = False

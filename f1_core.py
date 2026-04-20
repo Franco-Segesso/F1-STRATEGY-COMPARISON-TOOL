@@ -1,5 +1,6 @@
 import math
 import os
+import random
 
 from f1_data import TEAMS, TIRES, TRACKS, WEATHER, build_track_from_points, load_reference_profile
 
@@ -141,90 +142,273 @@ def get_integrator(method_name):
     return integrate_euler
 
 
+def _stable_seed(cfg):
+    token = "|".join(
+        [
+            str(cfg.get("trackName", "")),
+            str(cfg.get("teamName", "")),
+            str(cfg.get("driverName", "")),
+            str(cfg.get("tireName", "")),
+            str(cfg.get("weather", "")),
+            str(cfg.get("seed", "")),
+        ]
+    )
+    acc = 0
+    for idx, ch in enumerate(token):
+        acc += (idx + 1) * ord(ch)
+    return acc % (2 ** 31 - 1)
+
+
+def _tire_temp_factor(temp_c):
+    optimum = 98.0
+    delta = abs(temp_c - optimum)
+    return clamp(1.0 - 0.0032 * delta, 0.82, 1.02)
+
+
+def _wear_grip_factor(wear_pct):
+    return clamp(1.0 - 0.0037 * wear_pct, 0.68, 1.0)
+
+
+def _weather_temp_shift(weather_name):
+    if weather_name == "hot":
+        return 8.0
+    if weather_name == "cool":
+        return -6.0
+    if weather_name == "wet":
+        return -10.0
+    if weather_name == "damp":
+        return -4.0
+    return 0.0
+
+
+def _event_from_overspeed(rng, overspeed_ratio, skill, aggression, consistency):
+    if overspeed_ratio <= 0:
+        return None
+    base = overspeed_ratio * (0.44 + 0.40 * aggression) * (1.08 - 0.58 * consistency)
+    crash_prob = clamp(base * (1.30 - skill) * 0.30, 0.0, 0.45)
+    spin_prob = clamp(base * (1.15 - 0.35 * skill) * 0.62, 0.0, 0.65)
+    drag_prob = clamp(base * 0.72, 0.0, 0.72)
+    roll = rng.random()
+    if roll < crash_prob:
+        return dict(type="choque", penalty=0.0, speedMult=0.30, finished=False)
+    if roll < crash_prob + spin_prob:
+        penalty = 0.8 + 2.8 * overspeed_ratio + 0.7 * (1.0 - consistency)
+        speed_mult = clamp(0.70 - 0.28 * overspeed_ratio, 0.48, 0.76)
+        return dict(type="derrape", penalty=penalty, speedMult=speed_mult, finished=True)
+    if roll < crash_prob + spin_prob + drag_prob:
+        penalty = 0.3 + 1.7 * overspeed_ratio
+        speed_mult = clamp(0.84 - 0.18 * overspeed_ratio, 0.64, 0.90)
+        return dict(type="drag", penalty=penalty, speedMult=speed_mult, finished=True)
+    return None
+
+
+def _segment_exit_multiplier(seg_type, prep_lap=False):
+    if prep_lap:
+        return 0.68 if seg_type == "slow" else 0.80 if seg_type == "fast" else 0.88
+    return 0.72 if seg_type == "slow" else 0.85 if seg_type == "fast" else 0.91
+
+
+def _simulate_prep_lap(params, integrator, track, tire, weather_name, session, fuel, tire_wear, tire_temp, pilot_skill, pilot_aggression):
+    prep_t = 0.0
+    vc = 0.0
+    weather = WEATHER[weather_name]
+    for seg in track["segments"]:
+        prep_params = dict(params)
+        grip_factor = _wear_grip_factor(tire_wear) * _tire_temp_factor(tire_temp)
+        prep_params["gripEff"] = tire["grip"] * weather["gripFactor"] * tire["warmup"] * session["gripFactor"] * grip_factor
+        prep_params["powerW"] *= 0.92
+        prep_params["ersW"] *= 0.65
+        prep_params["cornerFactor"] *= clamp(0.93 + 0.02 * pilot_skill + 0.02 * pilot_aggression, 0.90, 0.98)
+
+        result = integrator(prep_params, seg, dict(fuel=fuel, wear=tire_wear, vEntry=vc), track)
+        prep_t += result["t"] * 1.02
+        vc = result["vOut"] * _segment_exit_multiplier(seg["type"], prep_lap=True)
+
+        temp_target = 100.0 + _weather_temp_shift(weather_name)
+        temp_gain = {"straight": 1.1, "fast": 2.3, "slow": 3.2}[seg["type"]] * (0.95 + 0.22 * pilot_aggression)
+        tire_temp += (temp_target - tire_temp) * 0.10 + temp_gain
+        tire_temp = clamp(tire_temp, 55.0, 125.0)
+
+        wear_gain = tire["wear"] * track["tyreStress"] * (0.045 + 0.030 * pilot_aggression)
+        tire_wear = clamp(tire_wear + wear_gain, 0.0, 100.0)
+
+    return dict(
+        prepLapTime=prep_t,
+        startV=clamp(vc, 45.0, 102.0),
+        tireTemp=tire_temp,
+        tireWear=tire_wear,
+    )
+
+
 def simulate(cfg):
-    w, track = WEATHER[cfg["weather"]], track_layout(cfg["trackName"])
+    weather_name = cfg.get("weather", "dry")
+    w, track = WEATHER[weather_name], track_layout(cfg["trackName"])
     ref = reference_adjustments(cfg["trackName"], cfg["teamName"])
-    sess = session_adjustments(cfg.get("sessionName", "R"))
-    top_speed_kph = ref.get("topSpeedKph") or cfg["topSpeedKph"]
-    fuel_base = (ref.get("fuelPerLapKg") or track["fuelPerLapKg"]) * w["fuelFactor"]
-    pit_loss = ref.get("pitLoss") or track["pitLoss"]
-    tire_plan = normalize_tire_plan(cfg)
-    current_tire_index = 0
-    tire_name = tire_plan[current_tire_index]
+    sess = session_adjustments(cfg.get("sessionName", "Q"))
+    team = TEAMS.get(cfg["teamName"], {})
+    tire_name = cfg["tireName"]
     tire = TIRES[tire_name]
+
+    pilot_skill = clamp(float(cfg.get("pilotSkill", 0.84)), 0.35, 1.0)
+    pilot_aggression = clamp(float(cfg.get("pilotAggression", 0.72)), 0.0, 1.0)
+    pilot_consistency = clamp(float(cfg.get("pilotConsistency", 0.80)), 0.0, 1.0)
+    tire_temp = clamp(float(cfg.get("tireTempC", 95.0)), 45.0, 145.0)
+    tire_wear = clamp(float(cfg.get("tireWearPct", 4.0)), 0.0, 100.0)
+    max_start_wear = clamp(float(cfg.get("maxStartWearPct", 78.0)), 30.0, 100.0)
+    fuel = max(1.0, float(cfg.get("fuel", 5.5)))
+
+    top_speed_kph = ref.get("topSpeedKph") or float(cfg.get("topSpeedKph", 338.0))
     p = dict(
-        powerW=cfg["power"] * 1000 * sess["powerFactor"],
-        ersW=cfg["ers"] * 120000 * sess["ersFactor"],
-        mass=cfg["mass"],
-        dragEff=cfg["drag"] * w["dragFactor"] * sess["dragFactor"],
-        downforce=cfg["downforce"] * 1.55,
-        traction=cfg["traction"],
-        brakeMS2=cfg["brake"] * 11.8 * track["brakeStress"],
+        powerW=float(cfg.get("power", team.get("power", 760))) * 1000 * sess["powerFactor"],
+        ersW=float(cfg.get("ers", team.get("ers", 1.0))) * 120000 * sess["ersFactor"],
+        mass=float(cfg.get("mass", team.get("mass", 770))),
+        dragEff=float(cfg.get("drag", team.get("drag", 0.84))) * w["dragFactor"] * sess["dragFactor"],
+        downforce=float(cfg.get("downforce", team.get("downforce", 1.15))) * 1.55,
+        traction=float(cfg.get("traction", team.get("traction", 1.12))),
+        brakeMS2=float(cfg.get("brake", team.get("brake", 1.12))) * 11.8 * track["brakeStress"],
         gripEff=tire["grip"] * w["gripFactor"] * tire["warmup"] * sess["gripFactor"],
-        cornerFactor=1.0 + 0.06 * (cfg["downforce"] - 1.0),
+        cornerFactor=(1.0 + 0.06 * (float(cfg.get("downforce", team.get("downforce", 1.15))) - 1.0)),
         topSpeedMS=(top_speed_kph * w["topSpeedFactor"]) / 3.6,
     )
-    integrator = get_integrator(cfg.get("integrationMethod", "Euler"))
-    pits = pit_sched(cfg["laps"], cfg["stops"])
-    st = dict(fuel=cfg["fuel"], wear=0, vEntry=62)
-    laps = []
-    finished = True
-    retired_lap = None
-    last_v_out = st["vEntry"]
-    for lap in range(1, cfg["laps"] + 1):
-        if st["fuel"] <= 0.05:
-            finished = False
-            retired_lap = lap
-            break
-        ld = dict(
-            lap=lap,
+
+    if tire_wear > max_start_wear:
+        failed_lap = dict(
+            lap=1,
             segV=dict(straight=0, fast=0, slow=0),
             segStats={k: dict(d=0, t=0) for k in ("straight", "fast", "slow")},
             pit=False,
             tire=tire_name,
+            time=0.0,
+            wear=tire_wear,
+            fuel=fuel,
+            tireTemp=tire_temp,
+            events=["neumatico_excesivamente_gastado"],
         )
-        lap_t = 0
-        vc = st["vEntry"]
-        for seg in track["segments"]:
-            r = integrator(p, seg, dict(fuel=st["fuel"], wear=st["wear"], vEntry=vc), track)
-            lap_t += r["t"]
-            vc = r["vOut"] * (0.70 if seg["type"] == "slow" else 0.84 if seg["type"] == "fast" else 0.90)
-            last_v_out = r["vOut"]
-            ld["segStats"][seg["type"]]["d"] += seg["distanceKm"] * 1000
-            ld["segStats"][seg["type"]]["t"] += r["t"]
-        for k, ss in ld["segStats"].items():
-            ld["segV"][k] = (ss["d"] / ss["t"]) * 3.6 if ss["t"] > 0 else 0
-        wear_gain = tire["wear"] * cfg["degrade"] * w["degFactor"] * track["tyreStress"] * (0.78 + 0.0048 * st["fuel"])
-        if cfg["weather"] == "wet" and cfg["tireName"] not in ("Intermedio", "Lluvia extrema"):
-            wear_gain *= 1.15
-        st["wear"] += wear_gain
-        st["fuel"] = max(0, st["fuel"] - (fuel_base * (0.985 + 0.00032 * lap_t)))
-        if lap in pits:
-            lap_t += pit_loss
-            st["wear"] = max(6, st["wear"] * 0.18)
-            ld["pit"] = True
-            current_tire_index = min(current_tire_index + 1, len(tire_plan) - 1)
-            tire_name = tire_plan[current_tire_index]
-            tire = TIRES[tire_name]
-            p["gripEff"] = tire["grip"] * w["gripFactor"] * tire["warmup"]
-        ld["time"], ld["wear"], ld["fuel"] = lap_t, st["wear"], st["fuel"]
-        laps.append(ld)
-        st["vEntry"] = max(45, vc)
-    avg = {k: (sum(l["segV"][k] for l in laps) / len(laps) if laps else 0) for k in ("straight", "fast", "slow")}
-    total = sum(l["time"] for l in laps)
-    best = min((l["time"] for l in laps), default=float("inf"))
+        return dict(
+            laps=[failed_lap],
+            total=0.0,
+            best=float("inf"),
+            avgSegment=dict(straight=0, fast=0, slow=0),
+            pitLaps=[],
+            tirePlan=[tire_name],
+            finished=False,
+            retiredLap=1,
+            integrationMethod=cfg.get("integrationMethod", "Euler"),
+            sessionName=cfg.get("sessionName", "Q"),
+            finalSegmentExitSpeed=0.0,
+            eventCounts=dict(neumatico_excesivamente_gastado=1),
+            eventPenalty=0.0,
+        )
+
+    rng = random.Random(_stable_seed(cfg))
+    integrator = get_integrator(cfg.get("integrationMethod", "RK4"))
+    prep = _simulate_prep_lap(
+        p,
+        integrator,
+        track,
+        tire,
+        weather_name,
+        sess,
+        fuel,
+        tire_wear,
+        tire_temp,
+        pilot_skill,
+        pilot_aggression,
+    )
+    start_v_entry = prep["startV"]
+    tire_temp = prep["tireTemp"]
+    tire_wear = prep["tireWear"]
+
+    ld = dict(
+        lap=1,
+        segV=dict(straight=0, fast=0, slow=0),
+        segStats={k: dict(d=0, t=0) for k in ("straight", "fast", "slow")},
+        pit=False,
+        tire=tire_name,
+        events=[],
+    )
+    event_counts = dict(derrape=0, drag=0, choque=0, frenada_temprana=0)
+    event_penalty = 0.0
+    last_v_out = start_v_entry
+    lap_t = 0.0
+    vc = start_v_entry
+    finished = True
+
+    for seg in track["segments"]:
+        grip_factor = _wear_grip_factor(tire_wear) * _tire_temp_factor(tire_temp)
+        p["gripEff"] = tire["grip"] * w["gripFactor"] * tire["warmup"] * sess["gripFactor"] * grip_factor
+        p["cornerFactor"] = (1.0 + 0.06 * (float(cfg.get("downforce", team.get("downforce", 1.15))) - 1.0))
+        p["cornerFactor"] *= 1.0 - 0.050 * (1.0 - pilot_skill) + 0.028 * pilot_aggression
+        p["cornerFactor"] = clamp(p["cornerFactor"], 0.86, 1.08)
+
+        r = integrator(p, seg, dict(fuel=fuel, wear=tire_wear, vEntry=vc), track)
+        seg_time = r["t"]
+
+        if seg["type"] != "straight":
+            early_brake = clamp((1.0 - pilot_skill) * (1.0 - 0.60 * pilot_aggression), 0.0, 0.10)
+            if early_brake > 0.01:
+                penalty = seg_time * early_brake
+                seg_time += penalty
+                event_penalty += penalty
+                event_counts["frenada_temprana"] += 1
+                vc *= clamp(1.0 - 0.26 * early_brake, 0.86, 1.0)
+
+            base_radius = 170.0 if seg["type"] == "fast" else 72.0
+            safe_v = math.sqrt(max(25.0, p["gripEff"] * G * base_radius)) * p["cornerFactor"]
+            target_mult = 0.98 + 0.08 * pilot_aggression - 0.05 * (1.0 - pilot_skill)
+            target_v = safe_v * target_mult
+            overspeed_ratio = max(0.0, (vc - target_v) / max(target_v, 1e-6))
+            event = _event_from_overspeed(rng, overspeed_ratio, pilot_skill, pilot_aggression, pilot_consistency)
+            if event:
+                event_counts[event["type"]] = event_counts.get(event["type"], 0) + 1
+                ld["events"].append(event["type"])
+                if event["penalty"] > 0:
+                    seg_time += event["penalty"]
+                    event_penalty += event["penalty"]
+                vc *= event.get("speedMult", 1.0)
+                if not event["finished"]:
+                    finished = False
+
+        lap_t += seg_time
+        vc = max(vc, 14.0)
+        vc = min(r["vOut"], vc) * _segment_exit_multiplier(seg["type"], prep_lap=False)
+        last_v_out = r["vOut"]
+        ld["segStats"][seg["type"]]["d"] += seg["distanceKm"] * 1000
+        ld["segStats"][seg["type"]]["t"] += seg_time
+
+        temp_target = 95.0 + _weather_temp_shift(weather_name)
+        temp_gain = {"straight": 0.9, "fast": 2.0, "slow": 2.8}[seg["type"]] * (0.90 + 0.30 * pilot_aggression)
+        tire_temp += (temp_target - tire_temp) * 0.06 + temp_gain
+        tire_temp = clamp(tire_temp, 45.0, 150.0)
+
+        wear_gain = tire["wear"] * track["tyreStress"] * (0.13 + 0.08 * pilot_aggression)
+        wear_gain *= 1.0 + max(0.0, (tire_temp - 110.0)) / 45.0
+        tire_wear = clamp(tire_wear + wear_gain, 0.0, 100.0)
+
+        if not finished:
+            break
+
+    for k, ss in ld["segStats"].items():
+        ld["segV"][k] = (ss["d"] / ss["t"]) * 3.6 if ss["t"] > 0 else 0
+    ld["time"], ld["wear"], ld["fuel"], ld["tireTemp"] = lap_t, tire_wear, fuel, tire_temp
+    avg = dict(ld["segV"])
+
     return dict(
-        laps=laps,
-        total=total,
-        best=best,
+        laps=[ld],
+        total=lap_t,
+        best=lap_t if finished else float("inf"),
         avgSegment=avg,
-        pitLaps=pits,
-        tirePlan=tire_plan,
+        pitLaps=[],
+        tirePlan=[tire_name],
         finished=finished,
-        retiredLap=retired_lap,
+        retiredLap=(None if finished else 1),
         integrationMethod=cfg.get("integrationMethod", "Euler"),
-        sessionName=cfg.get("sessionName", "R"),
+        sessionName=cfg.get("sessionName", "Q"),
         finalSegmentExitSpeed=last_v_out,
+        prepLapTime=prep["prepLapTime"],
+        flyingStartSpeedKph=start_v_entry * 3.6,
+        eventCounts=event_counts,
+        eventPenalty=event_penalty,
     )
 
 
