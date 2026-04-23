@@ -74,27 +74,56 @@ def normalize_tire_plan(cfg):
 
 def compute_accel(params, seg, state, track, v, dt=0.05):
     """Compute dv/dt from the current car state for both Euler and RK4."""
-    base_radius = {"straight": 12000, "fast": 170, "slow": 72}[seg["type"]]
-    top_speed = params["topSpeedMS"] * (0.985 if seg["type"] == "straight" else 0.88 if seg["type"] == "fast" else 0.72)
+    # Radios de giro ensanchados a la escala real de un circuito de F1
+    base_radius = {"straight": 12000, "fast": 320, "slow": 85}[seg["type"]]
+    top_speed = params["topSpeedMS"] * (0.985 if seg["type"] == "straight" else 0.94 if seg["type"] == "fast" else 0.78)
+    
     v = max(14, min(params["topSpeedMS"], v))
     m = params["mass"] + state["fuel"]
+    
     tyre_state = max(0.72, 1 - 0.0031 * state["wear"])
     grip = max(0.78, params["gripEff"] * tyre_state)
+    
+    # Fuerzas Longitudinales
     aero_downforce = 0.5 * RHO * params["downforce"] * v * v
     normal = m * G + aero_downforce
     traction = params["traction"] * grip * normal
-    straight_drag_scale = 0.92 if seg["type"] == "straight" and track["drsZones"] > 0 else 1.0
+    
+    straight_drag_scale = 0.92 if seg["type"] == "straight" and track.get("drsZones", 0) > 0 else 1.0
     drag = 0.5 * RHO * params["dragEff"] * straight_drag_scale * v * v
+    
     power_force = min((params["powerW"] + params["ersW"]) / max(v, 14), traction)
     rolling = 0.014 * m * G
+    
+    # Aceleración base si estuviéramos a fondo
     accel = (power_force - drag - rolling) / m
+    
     if seg["type"] != "straight":
-        vc = min(top_speed, math.sqrt(max(25, grip * G * base_radius)) * params["cornerFactor"])
+        # Despejamos 'v' de: (m * v^2 / r) = grip * (m * g + 0.5 * RHO * Cz * v^2)
+        aero_k = 0.5 * RHO * params["downforce"]
+        denom = (m / base_radius) - (grip * aero_k)
+        
+        # Prevenimos división por cero o negativo en caso de autos con carga extrema
+        denom = max(denom, 0.15) 
+        
+        vc = min(top_speed, math.sqrt((grip * m * G) / denom) * params["cornerFactor"])
+        
         if v > vc:
-            brake = (params["brakeMS2"] + 0.0045 * aero_downforce / m) * (1.05 if seg["type"] == "slow" else 0.92)
-            accel = -max(0.5, brake * (v - vc) / max(v, 1))
+            # 3. Frenado Agresivo F1 (aprox 4G a 5G)
+            # Multiplicamos la capacidad de frenado mecánica x2.5 para simular los discos de carbono
+            brake = (params["brakeMS2"] * 2.5 + 0.015 * aero_downforce / m) * (1.05 if seg["type"] == "slow" else 0.92)
+            
+            # El piloto frena a fondo (frenada tardía y agresiva)
+            accel = -brake
+            
+            # Trail braking: Suavizamos la desaceleración cuando estamos a 10 m/s del límite
+            # para no "pasarnos" ni oscilar violentamente en la curva
+            if (v - vc) < 10:
+                accel = -brake * ((v - vc) / 10.0)
     else:
+        # Limitador de aceleración en rectas al alcanzar la velocidad máxima
         accel = min(accel, (params["topSpeedMS"] - v) / max(dt, 1e-6))
+        
     return accel
 
 
@@ -204,8 +233,8 @@ def _event_from_overspeed(rng, overspeed_ratio, skill, aggression, consistency):
 
 def _segment_exit_multiplier(seg_type, prep_lap=False):
     if prep_lap:
-        return 0.68 if seg_type == "slow" else 0.80 if seg_type == "fast" else 0.88
-    return 0.72 if seg_type == "slow" else 0.85 if seg_type == "fast" else 0.91
+        return 0.85 if seg_type == "slow" else 0.90 if seg_type == "fast" else 0.95
+    return 1
 
 
 def _simulate_prep_lap(params, integrator, track, tire, weather_name, session, fuel, tire_wear, tire_temp, pilot_skill, pilot_aggression):
@@ -345,34 +374,35 @@ def simulate(cfg):
         seg_time = r["t"]
 
         if seg["type"] != "straight":
-            early_brake = clamp((1.0 - pilot_skill) * (1.0 - 0.60 * pilot_aggression), 0.0, 0.10)
+            # BUG RESOLVIDO: Penalizaciones de error ajustadas
+            early_brake = clamp((1.0 - pilot_skill) * (1.0 - 0.60 * pilot_aggression), 0.0, 0.05)
             if early_brake > 0.01:
-                penalty = seg_time * early_brake
+                penalty = seg_time * early_brake * 0.15 # Multiplicador reducido a la realidad
                 seg_time += penalty
                 event_penalty += penalty
                 event_counts["frenada_temprana"] += 1
-                vc *= clamp(1.0 - 0.26 * early_brake, 0.86, 1.0)
+                r["vOut"] *= clamp(1.0 - 0.10 * early_brake, 0.92, 1.0) # Se usa vOut en vez de vc
 
-            base_radius = 170.0 if seg["type"] == "fast" else 72.0
-            safe_v = math.sqrt(max(25.0, p["gripEff"] * G * base_radius)) * p["cornerFactor"]
-            target_mult = 0.98 + 0.08 * pilot_aggression - 0.05 * (1.0 - pilot_skill)
-            target_v = safe_v * target_mult
-            overspeed_ratio = max(0.0, (vc - target_v) / max(target_v, 1e-6))
-            event = _event_from_overspeed(rng, overspeed_ratio, pilot_skill, pilot_aggression, pilot_consistency)
+            # Evaluamos riesgo de error basado en desgaste y agresividad, no en la velocidad punta de la recta
+            risk_factor = max(0.0, pilot_aggression - pilot_skill + (tire_wear / 150.0))
+            event = _event_from_overspeed(rng, risk_factor * 0.4, pilot_skill, pilot_aggression, pilot_consistency)
             if event:
                 event_counts[event["type"]] = event_counts.get(event["type"], 0) + 1
                 ld["events"].append(event["type"])
                 if event["penalty"] > 0:
-                    seg_time += event["penalty"]
-                    event_penalty += event["penalty"]
-                vc *= event.get("speedMult", 1.0)
+                    real_penalty = min(event["penalty"], 1.2) # Maximo 1.2s de castigo por error menor
+                    seg_time += real_penalty
+                    event_penalty += real_penalty
+                r["vOut"] *= event.get("speedMult", 1.0)
                 if not event["finished"]:
                     finished = False
 
         lap_t += seg_time
-        vc = max(vc, 14.0)
-        vc = min(r["vOut"], vc) * _segment_exit_multiplier(seg["type"], prep_lap=False)
+        
+        # EL ARREGLO DE VELOCIDAD: ¡Ya no bloqueamos la aceleración con min()!
+        vc = max(14.0, r["vOut"] * _segment_exit_multiplier(seg["type"], prep_lap=False))
         last_v_out = r["vOut"]
+        
         ld["segStats"][seg["type"]]["d"] += seg["distanceKm"] * 1000
         ld["segStats"][seg["type"]]["t"] += seg_time
 
